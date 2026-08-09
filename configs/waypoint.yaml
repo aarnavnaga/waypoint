@@ -1,0 +1,78 @@
+# Waypoint gateway configuration.
+# Every value here can be overridden by env vars listed in internal/config/config.go.
+server:
+  port: 8080
+  max_queue: 512
+  max_concurrent: 256
+  shutdown_grace: 20s
+
+routing:
+  policy: prefix_affinity_load_aware
+  prefix_tokens: 256
+  load_factor: 1.25
+  virtual_nodes: 150
+
+backends:
+  - { name: mock-1, url: "http://toxiproxy:9001", max_inflight_tokens: 32000 }
+  - { name: mock-2, url: "http://toxiproxy:9002", max_inflight_tokens: 32000 }
+  - { name: mock-3, url: "http://toxiproxy:9003", max_inflight_tokens: 32000 }
+
+resilience:
+  retry_budget_pct: 10
+  max_attempts: 3
+  connect_timeout: 2s
+  ttft_timeout: 5s
+  request_timeout: 120s
+  backoff:
+    base: 20ms
+    max: 2s
+  breaker:
+    window: 10s
+    buckets: 10
+    min_requests: 20
+    error_rate: 0.5
+    timeout_rate: 0.5
+    open_duration: 5s
+    half_open_requests: 3
+  health_check:
+    interval: 2s
+    timeout: 1s
+    path: /healthz
+    healthy_threshold: 2
+    unhealthy_threshold: 3
+
+ratelimit:
+  enabled: true
+  rpm: 600
+  tpm: 200000
+  fail_open: true
+
+cache:
+  enabled: true
+  exact_ttl: 1h
+  semantic:
+    enabled: true
+    threshold: 0.92
+    ttl: 1h
+    embedder_url: "http://embeddings:8000"
+    embed_timeout: 500ms
+    dimensions: 384
+    index_name: waypoint_semantic
+    top_k: 3
+
+redis:
+  addr: "redis:6379"
+  db: 0
+  timeout: 200ms
+  key_prefix: waypoint
+
+telemetry:
+  service_name: waypoint-gateway
+  otlp_endpoint: "jaeger:4317"
+  trace_sampling: 1.0
+  log_level: info
+
+auth:
+  api_keys:
+    - dev-key
+    - bench-key

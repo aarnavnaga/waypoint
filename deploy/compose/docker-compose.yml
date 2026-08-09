@@ -1,0 +1,115 @@
+name: waypoint
+
+x-mock-defaults: &mock-defaults
+  build:
+    context: ../..
+    dockerfile: deploy/compose/Dockerfile.mockbackend
+  command: ["-config", "/etc/waypoint/mockbackend.yaml"]
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:9001/healthz"]
+    interval: 5s
+    timeout: 2s
+    retries: 10
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis/redis-stack-server:7.4.0-v1
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  mock-1:
+    <<: *mock-defaults
+    environment: { MOCKBACKEND_ADDR: ":9001", MOCKBACKEND_NAME: mock-1, MOCKBACKEND_SEED: "1" }
+
+  mock-2:
+    <<: *mock-defaults
+    environment: { MOCKBACKEND_ADDR: ":9001", MOCKBACKEND_NAME: mock-2, MOCKBACKEND_SEED: "2" }
+
+  mock-3:
+    <<: *mock-defaults
+    environment: { MOCKBACKEND_ADDR: ":9001", MOCKBACKEND_NAME: mock-3, MOCKBACKEND_SEED: "3" }
+
+  # Toxiproxy fronts every backend so benchmarks can inject latency/errors/kills.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - "8474:8474"   # control API
+      - "9001:9001"
+      - "9002:9002"
+      - "9003:9003"
+    command: ["-host", "0.0.0.0", "-config", "/config/toxiproxy.json"]
+    volumes:
+      - ../toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    depends_on:
+      mock-1: { condition: service_healthy }
+      mock-2: { condition: service_healthy }
+      mock-3: { condition: service_healthy }
+
+  embeddings:
+    build:
+      context: ../../sidecar/embeddings
+      dockerfile: Dockerfile
+    environment:
+      MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.gateway
+    ports: ["8080:8080"]
+    environment:
+      WAYPOINT_REDIS_ADDR: redis:6379
+      WAYPOINT_OTLP_ENDPOINT: jaeger:4317
+      WAYPOINT_EMBEDDER_URL: http://embeddings:8000
+      WAYPOINT_LOG_LEVEL: info
+    depends_on:
+      redis: { condition: service_healthy }
+      toxiproxy: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports: ["9090:9090"]
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]

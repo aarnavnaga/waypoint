@@ -1,0 +1,5 @@
+[
+  { "name": "mock-1", "listen": "0.0.0.0:9001", "upstream": "mock-1:9001", "enabled": true },
+  { "name": "mock-2", "listen": "0.0.0.0:9002", "upstream": "mock-2:9001", "enabled": true },
+  { "name": "mock-3", "listen": "0.0.0.0:9003", "upstream": "mock-3:9001", "enabled": true }
+]

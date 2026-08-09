@@ -1,0 +1,16 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG GIT_SHA=dev
+RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=${GIT_SHA}" -o /out/gateway ./cmd/gateway
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates curl && adduser -D -u 10001 waypoint
+COPY --from=build /out/gateway /usr/local/bin/gateway
+COPY configs /etc/waypoint
+USER waypoint
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/gateway"]
+CMD ["-config", "/etc/waypoint/waypoint.yaml"]

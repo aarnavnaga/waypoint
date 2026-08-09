@@ -1,0 +1,12 @@
+bin/
+dist/
+*.out
+*.test
+coverage.out
+coverage.html
+.DS_Store
+.env
+sidecar/embeddings/.venv/
+sidecar/embeddings/__pycache__/
+bench/results/**/raw/
+node_modules/
