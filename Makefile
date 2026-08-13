@@ -52,7 +52,7 @@ integration: ## Run Compose-backed integration tests
 
 .PHONY: fuzz
 fuzz: ## Run fuzz targets briefly
-	$(GO) test -run=XXX -fuzz=FuzzParseChatRequest -fuzztime=30s ./internal/api
+	$(GO) test -run=XXX -fuzz=FuzzParseChatRequest -fuzztime=30s ./internal/openai
 	$(GO) test -run=XXX -fuzz=FuzzSSEDecoder -fuzztime=30s ./internal/sse
 
 .PHONY: lint

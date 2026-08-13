@@ -1,0 +1,40 @@
+# Mock backend simulation parameters.
+# Committed so every benchmark run is reproducible from this file alone.
+name: mock
+addr: ":9001"
+seed: 1
+models:
+  - mock-7b
+
+# Prefill: the cost paid before the first output token. Only *uncached* prompt
+# tokens are charged, which is what prefix-aware routing exploits.
+prefill:
+  per_token: 250us
+  base: 5ms
+
+# Decode: steady-state generation. Per-token cost grows with batch size as
+#   interval = 1/tokens_per_second * (1 + alpha * (batch-1)^beta)
+decode:
+  tokens_per_second: 120
+  alpha: 0.08
+  beta: 1.0
+
+batching:
+  max_batch: 8
+  max_queue: 256
+
+# 2048 blocks x 16 tokens = 32k tokens of KV cache, roughly one 7B model's
+# practical prefix budget on a small GPU.
+prefix_cache:
+  block_size: 16
+  capacity_blocks: 2048
+
+output:
+  min_tokens: 48
+  max_tokens: 256
+
+faults:
+  error_rate: 0
+  extra_latency_ms: 0
+  hang: false
+  slow_tokens: 0

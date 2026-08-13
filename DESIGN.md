@@ -76,12 +76,82 @@ dereferenced as `.Duration` at use sites.
 not restate 60 fields. It also means adding a new tunable does not break existing config
 files — important because benchmark configs are committed and re-run later.
 
+### D5 — Token estimation: byte heuristic on the hot path, split tokenizer in simulation
+
+**Chosen:** two `tokenizer.Estimator` implementations behind one interface.
+`CharHeuristic` (bytes ÷ 4) runs on the gateway's request path; `Split`, a
+deterministic word/subword splitter, runs inside the mock backend.
+
+**Alternatives:** (a) a real BPE tokenizer (tiktoken port) everywhere, (b) the
+heuristic everywhere.
+
+**Why:** routing and admission control need a count that is *consistent and monotone
+in prompt size*, not exact — a 5% error in estimated load does not change which
+backend is least loaded. A real tokenizer costs a model-specific vocabulary (a
+megabytes-large asset that must match the backend's model) and turns an O(1) length
+read into an O(n) scan on every request. The simulation side is different: prefix
+*blocks* must align with plausible token boundaries, so there the slower splitter earns
+its cost.
+
+**Measured:** `TestHeuristicAgreesWithSplit` reports **4.9% relative error** across a
+mixed prose/code corpus. The test fails above 35%, so a regression in either estimator
+is caught rather than silently degrading routing quality. Interface placement means
+swapping in a real tokenizer later is a one-line change at construction.
+
+### D6 — Prefix cache keyed by *chained* block hashes, not per-block content hashes
+
+**Chosen:** `hash[i] = FNV1a(hash[i-1] || tokens of block i)`.
+
+**Alternatives:** hash each block independently by content.
+
+**Why:** a transformer's KV values for a token depend on every preceding token, so a
+block of identical text at a different position — or after a different prefix — holds
+*different* KV state and must not be reused. Independent per-block hashing would
+produce false hits and a simulation that reports cache savings that a real engine could
+never deliver. This mirrors how vLLM and SGLang key their block tables.
+`TestBlockHashesAreChained` and `TestPrefixCacheStopsAtFirstMiss` pin the behavior.
+
+A trailing *partial* block is never cached, also matching real engines, which can only
+commit a block once it is full.
+
+### D7 — Admission and prefill happen before any response byte is written
+
+**Chosen:** `Engine.Admit` (acquire batch slot → simulate prefill) is separate from
+`Engine.Decode`. The HTTP handler calls `Admit` *before* writing status, headers or the
+SSE role chunk.
+
+**Why — this was a real bug, caught by measurement, not by tests.** The first
+implementation wrote the `role: assistant` chunk immediately and then paid prefill
+inside the streaming loop. Every unit test still passed, because they assert on token
+*content*, not on when bytes hit the wire. But measuring with curl showed cold and warm
+TTFT were identical at ~0.9 ms: the client saw its first byte before any simulated work
+happened, so prefix-cache savings were **invisible to any client-side measurement** —
+and the entire M8 routing benchmark would have reported noise.
+
+After the split, the same measurement shows **235 ms cold vs. 10 ms warm** (~23x) on a
+~900-token repeated prompt.
+
+A second benefit: a request shed because the batch queue is full can now return a real
+`503` with an OpenAI-shaped error body, instead of a truncated `200` stream — you
+cannot un-send a status line.
+
+`TestAdmitBlocksForPrefillBeforeDecoding` now guards the ordering directly.
+
+### D8 — Simulation lives in `internal/mocksim`, not in `cmd/mockbackend`
+
+**Chosen:** the prefix cache, scheduler, generator and fault state are a library;
+`cmd/mockbackend` is thin wiring.
+
+**Why:** SPEC §9's layout lists `cmd/mockbackend/`, and this adds a package the spec
+does not name. The justification is testability — the timing model, LRU eviction and
+batch-pressure curve are the parts most likely to be wrong, and they are far easier to
+test as a library (`Engine.Plan` / `Admit` / `Decode`) than through HTTP. The gateway's
+own view of a backend remains `internal/backend`, which is a different concern.
+
 ---
 
 ## 3. Deferred / open questions
 
-- **Token estimation** (M3): byte-length heuristic vs. a real tokenizer behind an
-  interface. Decided in M3; recorded there with measured error.
 - **Retry budget accounting** (M4): per-replica vs. Redis-shared. Leaning per-replica
   for hot-path latency; to be recorded in M4.
 - **Semantic cache quality proxy** (M6/M8): how to score a cached answer against a
