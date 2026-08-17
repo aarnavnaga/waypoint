@@ -187,3 +187,93 @@ load estimates are biased but highly correlated with true load, which is suffici
 choosing among backends. The cost — replicas can transiently disagree — is bounded by
 the bounded-load constraint in the prefix-affinity policy. Revisit if replica count
 grows past the point where each replica's sample is too thin.
+
+---
+
+## 5. M2 decisions — pass-through proxy
+
+### D9 — Nothing is written to the client until the upstream response is known good
+
+**Chosen:** `Proxy.Dispatch` writes no status line, headers or body until it has an
+upstream response it intends to relay. `Outcome.ResponseStarted` records the moment
+that changes.
+
+**Why:** HTTP has no undo. Once `200 OK` and a few SSE chunks are on the wire, the
+gateway cannot retry on another backend, cannot convert the response into a `502`, and
+cannot apologize — the client is already parsing a stream. Making "has the response
+started?" an explicit, single-source-of-truth field (rather than inferring it from
+error types) is what lets M4's retry logic be correct by construction: `Retryable()` is
+simply `!ResponseStarted`.
+
+This also means a 5xx from the backend never reaches the client as a 5xx body; it
+becomes a gateway-generated `502` with an OpenAI-shaped envelope, and the attempt stays
+eligible for failover.
+
+### D10 — 4xx is passed through; 5xx is not
+
+**Chosen:** upstream `4xx` is relayed verbatim to the client and marks the response
+started. Upstream `5xx` is converted into a dispatch error and left retryable.
+
+**Why:** the distinction is *whose fault it is*. A 400 means the request is malformed —
+every backend will reject it identically, so retrying wastes capacity and delays the
+error the client needs to see. A 503 means that particular server is unhappy, which
+says nothing about its peers.
+
+### D11 — Separate TTFT and total-request deadlines
+
+**Chosen:** two independent bounds. The TTFT timer cancels the attempt if no *content*
+token arrives in time, and is stopped the moment one does; the overall request deadline
+comes from the parent context.
+
+**Alternatives:** a single `http.Client.Timeout`.
+
+**Why:** a client timeout would bound *total* generation, which is exactly wrong for
+streaming — a healthy 4,000-token answer legitimately takes minutes, while a backend
+that accepts a connection and then stalls should be detected in seconds. These are
+different failure modes and need different limits. The mock backend's `hang` fault
+exists to test precisely this: the TCP connection is fine, so a transport-level timeout
+would not fire.
+
+The role chunk (`delta.role` with empty content) deliberately does **not** satisfy the
+TTFT deadline — counting it would mean a stalled backend could hold a request open
+forever by sending one empty chunk, and it would understate measured TTFT by the whole
+prefill.
+
+### D12 — The `Authorization` header is not forwarded upstream
+
+**Chosen:** an explicit allow-list of passthrough headers (`traceparent`, `tracestate`,
+`X-Request-Id`, `X-Waypoint-Cache`). Client credentials are dropped.
+
+**Why:** the client's API key authenticates it to *Waypoint*, not to the model servers.
+Forwarding it spreads tenant credentials across every backend in the fleet, so a single
+compromised or misconfigured model server leaks keys for every tenant that ever routed
+to it. The backends sit on a trusted network and have their own (absent) auth model.
+
+### D13 — Admission control is an aging priority queue, not a plain semaphore
+
+**Chosen:** `internal/admission` is a bounded heap ordered by effective priority, where
+waiting time improves a request's position.
+
+**Why aging:** strict priority queues starve. A sustained flood of interactive traffic
+would leave batch requests queued indefinitely, which shows up as a p99.9 that never
+recovers rather than as an outage.
+
+**How it is implemented — and a bug this caused.** The first version computed effective
+priority *inside* the heap's `Less` method from a clock read at pop time. This does not
+work: `container/heap` establishes its ordering invariant when an element is **pushed**,
+so mutating the comparison function afterwards does not reorder anything already in the
+heap. The aging test failed, correctly, showing a freshly arrived interactive request
+beating a batch request that had waited five seconds.
+
+The fix is the standard one: convert aging into a **static deadline** computed once at
+enqueue (`deadline = enqueued + class × agingInterval`) and order by it. This is
+earliest-deadline-first, is equivalent to a priority that improves while waiting, and
+keeps the heap invariant valid without re-heapifying on every release.
+
+### D14 — `statusRecorder` must forward `Flush`
+
+A middleware that wraps `http.ResponseWriter` to capture the status code silently breaks
+streaming, because the inner handler's `w.(http.Flusher)` assertion then fails against
+the wrapper and every token sits in a buffer. The logging middleware's recorder
+implements `Flush()` explicitly for this reason. This is a classic, quiet Go HTTP bug:
+nothing errors, responses just stop streaming.

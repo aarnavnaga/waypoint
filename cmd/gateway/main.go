@@ -14,7 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aarnavnaga/waypoint/internal/admission"
+	"github.com/aarnavnaga/waypoint/internal/api"
+	"github.com/aarnavnaga/waypoint/internal/backend"
 	"github.com/aarnavnaga/waypoint/internal/config"
+	"github.com/aarnavnaga/waypoint/internal/router"
+	"github.com/aarnavnaga/waypoint/internal/tokenizer"
 )
 
 // version is injected at build time via -ldflags.
@@ -44,27 +49,73 @@ func run() error {
 
 	logger := newLogger(cfg.Telemetry.LogLevel)
 	slog.SetDefault(logger)
+
+	pool, err := backend.NewPool(cfg.Backends)
+	if err != nil {
+		return fmt.Errorf("build backend pool: %w", err)
+	}
+
+	estimator := tokenizer.NewCharHeuristic()
+
+	rt, err := router.New(cfg.Routing, estimator)
+	if err != nil {
+		return fmt.Errorf("build router: %w", err)
+	}
+
+	proxy := api.NewProxy(newUpstreamClient(cfg), api.Timeouts{
+		TTFT:    cfg.Resilience.TTFTTimeout.Duration,
+		Request: cfg.Resilience.RequestTimeout.Duration,
+	}, logger)
+
+	admitter := admission.New(admission.Options{
+		MaxConcurrent: cfg.Server.MaxConcurrent,
+		MaxQueue:      cfg.Server.MaxQueue,
+		AgingInterval: 2 * time.Second,
+	})
+
+	upstream := newUpstreamClient(cfg)
+
+	discoverer := backend.NewDiscoverer(pool, backend.DiscovererOptions{
+		Client:   upstream,
+		Interval: 30 * time.Second,
+		Timeout:  cfg.Resilience.ConnectTimeout.Duration,
+		Logger:   logger,
+	})
+
+	server := api.NewServer(api.Options{
+		Config:    cfg,
+		Pool:      pool,
+		Router:    rt,
+		Proxy:     proxy,
+		Admission: admitter,
+		Estimator: estimator,
+		Logger:    logger,
+		Version:   version,
+	})
+
+	srv := &http.Server{
+		Addr:              net.JoinHostPort("", fmt.Sprintf("%d", cfg.Server.Port)),
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Duration,
+		// No WriteTimeout: streaming responses are long-lived by design, and a
+		// write deadline would sever healthy long generations mid-stream.
+		// Per-request bounds come from context deadlines instead.
+	}
+
 	logger.Info("starting waypoint gateway",
 		"version", version,
 		"policy", cfg.Routing.Policy,
 		"backends", len(cfg.Backends),
 		"port", cfg.Server.Port,
+		"max_concurrent", cfg.Server.MaxConcurrent,
+		"max_queue", cfg.Server.MaxQueue,
 	)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
-	})
-
-	srv := &http.Server{
-		Addr:              net.JoinHostPort("", fmt.Sprintf("%d", cfg.Server.Port)),
-		Handler:           mux,
-		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Duration,
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Discover which models each backend serves, and keep it current.
+	go discoverer.Run(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -80,13 +131,46 @@ func run() error {
 		logger.Info("shutdown signal received", "grace", cfg.Server.ShutdownGrace.Duration)
 	}
 
+	// Stop admitting first so queued requests fail fast rather than waiting out
+	// the grace period for capacity that is never coming.
+	admitter.Shutdown()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownGrace.Duration)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
+
 	logger.Info("gateway stopped cleanly")
 	return nil
+}
+
+// newUpstreamClient builds the HTTP client used for backend calls.
+//
+// Streaming shapes every choice here: compression is disabled because a
+// compressing proxy buffers until it has enough bytes to compress, which adds
+// latency to exactly the first token; there is no client-level Timeout because
+// that would cap total generation time rather than time-to-first-token, and
+// phase-specific deadlines are enforced by context instead.
+func newUpstreamClient(cfg config.Config) *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   cfg.Resilience.ConnectTimeout.Duration,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		// Inference calls are long-lived and few per host, but connection reuse
+		// still matters: a fresh TCP+TLS handshake per request would show up
+		// directly in TTFT.
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   cfg.Resilience.ConnectTimeout.Duration,
+		ExpectContinueTimeout: time.Second,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     true,
+	}
+
+	return &http.Client{Transport: transport}
 }
 
 func newLogger(level string) *slog.Logger {
