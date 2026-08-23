@@ -485,3 +485,135 @@ func TestRuntimePolicySwitch(t *testing.T) {
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
+
+// setPolicy switches the gateway's routing policy at runtime.
+func (s *stack) setPolicy(t *testing.T, name string) {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]string{"policy": name})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp, err := s.client.Post(s.gatewayURL+"/admin/routing", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /admin/routing: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set policy %s: status %d", name, resp.StatusCode)
+	}
+}
+
+// resetBackends clears every backend's prefix cache and counters so each policy
+// is measured against an identically cold fleet.
+func (s *stack) resetBackends(t *testing.T) {
+	t.Helper()
+	for _, srv := range s.backends {
+		resp, err := s.client.Post(srv.URL+"/admin/reset", "application/json", nil)
+		if err != nil {
+			t.Fatalf("reset backend: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+// aggregatePrefixHitRate sums cache behavior across the fleet.
+func (s *stack) aggregatePrefixHitRate() float64 {
+	var hits, lookups uint64
+	for _, e := range s.engines {
+		st := e.Stats()
+		hits += st.PrefixCache.BlockHits
+		lookups += st.PrefixCache.BlockLookups
+	}
+	if lookups == 0 {
+		return 0
+	}
+	return float64(hits) / float64(lookups)
+}
+
+// TestPrefixAffinityBeatsRoundRobinOnCacheHitRate is the qualitative result the
+// whole routing milestone exists to produce: with traffic drawn from a small set
+// of shared system prompts, affinity routing keeps each prompt on the backend
+// that already holds its KV blocks, while round robin scatters them.
+//
+// This is a correctness check, not a benchmark — it asserts a direction, not a
+// number. Quantitative results come from bench/ in M8.
+func TestPrefixAffinityBeatsRoundRobinOnCacheHitRate(t *testing.T) {
+	s := newStack(t, 3, func(c *mocksim.Config) {
+		c.Prefill.PerToken = mocksim.Duration{Duration: 100 * time.Microsecond}
+		c.Output.MinTokens, c.Output.MaxTokens = 4, 4
+	})
+
+	// Four distinct system prompts, each long enough to span many cache blocks.
+	systemPrompts := []string{
+		strings.Repeat("You are a precise assistant for billing questions. ", 20),
+		strings.Repeat("You are a code reviewer focused on concurrency bugs. ", 20),
+		strings.Repeat("You are a support agent for networking hardware. ", 20),
+		strings.Repeat("You are a tutor explaining linear algebra slowly. ", 20),
+	}
+
+	runWorkload := func() {
+		for i := 0; i < 60; i++ {
+			sys := systemPrompts[i%len(systemPrompts)]
+			resp := s.chat(t, openai.ChatRequest{
+				Model:  "mock-7b",
+				Stream: true,
+				Messages: []openai.Message{
+					{Role: openai.RoleSystem, Content: sys},
+					{Role: openai.RoleUser, Content: fmt.Sprintf("question %d", i)},
+				},
+			})
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d", resp.StatusCode)
+			}
+			readStream(t, resp)
+		}
+	}
+
+	s.setPolicy(t, config.PolicyRoundRobin)
+	s.resetBackends(t)
+	runWorkload()
+	roundRobinRate := s.aggregatePrefixHitRate()
+
+	s.setPolicy(t, config.PolicyPrefixAffinity)
+	s.resetBackends(t)
+	runWorkload()
+	affinityRate := s.aggregatePrefixHitRate()
+
+	t.Logf("prefix cache hit rate: round_robin=%.3f prefix_affinity=%.3f (+%.1f pp)",
+		roundRobinRate, affinityRate, (affinityRate-roundRobinRate)*100)
+
+	if affinityRate <= roundRobinRate {
+		t.Errorf("prefix_affinity hit rate %.3f did not beat round_robin %.3f",
+			affinityRate, roundRobinRate)
+	}
+}
+
+// Load-aware affinity must still serve every request correctly when one backend
+// is hot; it trades locality for balance rather than failing.
+func TestLoadAwareAffinityServesUnderImbalance(t *testing.T) {
+	s := newStack(t, 3, nil)
+	s.setPolicy(t, config.PolicyPrefixAffinityLoadAware)
+
+	// Pin a large synthetic load onto one backend.
+	hot, _ := s.pool.Get("mock-1")
+	release := hot.Reserve(500_000)
+	defer release()
+
+	seen := map[string]int{}
+	for i := 0; i < 20; i++ {
+		resp := s.chat(t, openai.ChatRequest{
+			Model:    "mock-7b",
+			Messages: []openai.Message{{Role: openai.RoleUser, Content: "same prefix every time"}},
+		})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status %d", i, resp.StatusCode)
+		}
+		seen[resp.Header.Get("X-Waypoint-Backend")]++
+	}
+
+	t.Logf("distribution with mock-1 saturated: %v", seen)
+	if seen["mock-1"] > 2 {
+		t.Errorf("load-aware policy sent %d requests to the saturated backend", seen["mock-1"])
+	}
+}

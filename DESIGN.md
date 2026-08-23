@@ -277,3 +277,93 @@ streaming, because the inner handler's `w.(http.Flusher)` assertion then fails a
 the wrapper and every token sits in a buffer. The logging middleware's recorder
 implements `Flush()` explicitly for this reason. This is a classic, quiet Go HTTP bug:
 nothing errors, responses just stop streaming.
+
+---
+
+## 6. M3 decisions — routing policies
+
+### D15 — Consistent hashing with bounded loads for prefix affinity
+
+**Chosen:** a hash ring with ~150 virtual nodes per backend, plus the bounded-load rule
+from Mirrokni, Thorup & Zadimoghaddam (2016): a key goes to its preferred backend only
+if that backend is under a ceiling of `c × average load`, otherwise the walk continues
+clockwise.
+
+**Alternatives:** (a) `hash(prefix) % N`, (b) rendezvous (highest-random-weight) hashing,
+(c) plain consistent hashing with no load bound.
+
+**Why not modulo:** the eligible backend set changes constantly — health flaps, breakers
+open, servers saturate. Removing one backend of N under modulo hashing remaps
+essentially *every* key, which invalidates every prefix cache in the fleet
+simultaneously. That turns a single backend failure into a fleet-wide cold-cache event,
+precisely when capacity is already reduced. Measured here: removing 1 of 5 backends
+remaps **19.3%** of keys (ideal 1/N = 20%), versus ~80% for modulo.
+
+**Why not rendezvous:** rendezvous hashing gives better key distribution without virtual
+nodes and is simpler to reason about, but lookup is O(N) per request against O(log N)
+for a sorted ring, and it has no natural place to attach the bounded-load rule — the
+"walk to the next node" step is what makes spillover cheap and ordered. With N small
+(3–10 backends) the O(N) cost would be acceptable; the deciding factor was bounded-load
+support.
+
+**Why bounded loads:** prompt popularity is heavily skewed in practice (a handful of
+system prompts serve most traffic). Plain consistent hashing has no safety valve, so the
+backend owning the most popular prompt is buried while its peers idle. The ceiling
+converts unbounded tail latency into a bounded one. `TestPrefixAffinityBoundedLoadUnderSkew`
+drives 200 requests that *all* share one prefix and asserts no backend exceeds the
+ceiling, while also asserting the load genuinely spilled to more than one backend (so
+the test cannot pass trivially).
+
+### D16 — Two affinity policies that differ only in their fallback
+
+`prefix_affinity` walks to the **next backend on the ring** when the preferred one is
+over capacity; `prefix_affinity_load_aware` jumps to the **globally least loaded**.
+
+The first keeps a stable, locality-preserving fallback order — the spillover target for
+a given key is always the same backend, so even overflow traffic has cache affinity. The
+second optimizes purely for balance. Which is better depends on how skewed the workload
+is and how expensive a cache miss is, which is an empirical question; both exist so M8
+can answer it rather than this document asserting it.
+
+### D17 — FNV-1a alone is not an adequate ring hash
+
+**This was a real bug, and the kind that produces plausible-looking wrong benchmarks.**
+
+The ring originally hashed with FNV-1a. All unit tests about *stability* and *bounded
+load* passed, because those properties do not depend on the hash being well distributed.
+The distribution test did not:
+
+```
+arc share of keyspace:  mock-1 10.8%  mock-2 40.1%  mock-3 30.0%  mock-4 19.1%
+key landing counts:     mock-1 90     mock-2 100    mock-3 210    mock-4 0
+```
+
+One backend of four owned 40% of the keyspace; another received **none** of a 400-key
+sample. The cause is FNV-1a's weak avalanche on short, highly similar inputs — and ring
+keys are exactly that (`mock-1#0`, `mock-2#0`, …, differing in one byte). Correlated
+inputs produce correlated hashes, so virtual nodes clump instead of spreading, defeating
+the entire purpose of having 150 of them.
+
+The fix is to run the FNV output through MurmurHash3's 64-bit finalizer (`mix64`), an
+invertible bit mixer that costs a handful of ALU operations. After it:
+
+```
+arc share of keyspace:  mock-1 25.8%  mock-2 22.6%  mock-3 26.3%  mock-4 25.3%
+key landing counts:     mock-1 511    mock-2 456    mock-3 542    mock-4 491   (of 2000)
+```
+
+**Why not `hash/maphash`:** it is a good, fast, well-distributed hash — and completely
+wrong here, because its seed is randomized per process. Two gateway replicas would build
+different rings and send the same prefix to different backends, fragmenting the caches
+the policy exists to exploit. Ring hashing must be deterministic across processes and
+across restarts.
+
+`TestHashRingArcsAreBalanced`, `TestHashRingKeyDistribution` and `TestMix64Avalanche`
+now guard this, since nothing else would have caught it.
+
+### D18 — The ring is cached and rebuilt only when the backend set changes
+
+The eligible set is recomputed per request (health, breaker state, capacity, model), but
+it changes rarely. Rebuilding a 450–1500 point sorted ring on every request would be
+real hot-path cost for no benefit, so the ring is memoized behind an atomic pointer keyed
+by a fingerprint of the backend names. A set change transparently rebuilds exactly once.

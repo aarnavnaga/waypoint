@@ -177,8 +177,12 @@ func buildPolicy(name string, cfg config.Routing) (Policy, error) {
 	switch name {
 	case config.PolicyRoundRobin:
 		return NewRoundRobin(), nil
-	case config.PolicyLeastLoaded, config.PolicyPrefixAffinity, config.PolicyPrefixAffinityLoadAware:
-		return nil, fmt.Errorf("routing policy %q is not implemented yet", name)
+	case config.PolicyLeastLoaded:
+		return NewLeastLoaded(), nil
+	case config.PolicyPrefixAffinity:
+		return NewPrefixAffinity(cfg.VirtualNodes, cfg.LoadFactor), nil
+	case config.PolicyPrefixAffinityLoadAware:
+		return NewPrefixAffinityLoadAware(cfg.VirtualNodes, cfg.LoadFactor), nil
 	default:
 		return nil, fmt.Errorf("unknown routing policy %q (valid: %s)",
 			name, strings.Join(config.ValidPolicies, ", "))
