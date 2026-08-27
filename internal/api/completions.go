@@ -43,23 +43,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	routeReq := s.router.BuildRequest(req)
 
-	candidates := s.pool.Available(req.Model)
-	if len(candidates) == 0 {
+	if len(s.pool.Available(req.Model)) == 0 {
 		s.writeNoBackendError(w, req.Model)
 		return
 	}
-
-	target, err := s.router.Pick(ctx, routeReq, candidates)
-	if err != nil {
-		s.writeNoBackendError(w, req.Model)
-		return
-	}
-
-	// Reserve estimated load *before* dispatching so concurrent routing
-	// decisions see this request's cost. Reserving after dispatch would let a
-	// burst of simultaneous requests all pick the same "idle" backend.
-	release := target.Reserve(routeReq.EstimatedTokens)
-	defer release()
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -68,19 +55,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outcome, err := s.proxy.Dispatch(ctx, w, target, req, body, passthroughHeaders(r))
+	// Every request deposits retry budget, whether or not it ends up retrying.
+	// The budget is a fraction of *total* traffic, so deposits must track all
+	// requests rather than only failing ones.
+	if s.budget != nil {
+		s.budget.Deposit()
+	}
+
+	result, err := s.dispatcher.Do(ctx, w, req, routeReq, body, passthroughHeaders(r))
 	if err != nil {
+		started := result != nil && result.Outcome != nil && result.Outcome.ResponseStarted
 		s.logger.Warn("dispatch failed",
-			"backend", target.Name,
 			"model", req.Model,
-			"response_started", outcome != nil && outcome.ResponseStarted,
+			"attempts", result.Attempts,
+			"tried", result.Tried,
+			"response_started", started,
 			"error", err,
 		)
 
 		// Once any byte has reached the client, the response is committed:
 		// writing an error envelope now would corrupt the stream the client is
 		// already parsing.
-		if outcome != nil && outcome.ResponseStarted {
+		if started {
 			return
 		}
 		if ctx.Err() != nil {
@@ -93,11 +89,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Debug("dispatch complete",
-		"backend", target.Name,
+		"backend", result.Outcome.Backend.Name,
 		"model", req.Model,
-		"ttft_ms", outcome.TTFT.Milliseconds(),
-		"completion_tokens", outcome.CompletionTokens,
-		"duration_ms", outcome.Duration.Milliseconds(),
+		"attempts", result.Attempts,
+		"ttft_ms", result.Outcome.TTFT.Milliseconds(),
+		"completion_tokens", result.Outcome.CompletionTokens,
+		"duration_ms", result.Outcome.Duration.Milliseconds(),
 	)
 }
 

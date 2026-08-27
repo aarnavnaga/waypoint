@@ -19,6 +19,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/config"
 	"github.com/aarnavnaga/waypoint/internal/mocksim"
 	"github.com/aarnavnaga/waypoint/internal/openai"
+	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
 	"github.com/aarnavnaga/waypoint/internal/sse"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
@@ -37,15 +38,18 @@ type fixture struct {
 	pool      *backend.Pool
 	router    *router.Router
 	admission *admission.Controller
+	breakers  *Breakers
+	budget    *resilience.RetryBudget
 }
 
 type fixtureOpts struct {
-	backends   int
-	apiKeys    []string
-	maxConc    int
-	maxQueue   int
-	ttft       time.Duration
-	mutateMock func(*mocksim.Config)
+	backends    int
+	apiKeys     []string
+	maxConc     int
+	maxQueue    int
+	ttft        time.Duration
+	maxAttempts int
+	mutateMock  func(*mocksim.Config)
 }
 
 func newFixture(t *testing.T, opts fixtureOpts) *fixture {
@@ -116,18 +120,42 @@ func newFixture(t *testing.T, opts fixtureOpts) *fixture {
 	})
 	f.admission = admitter
 
+	proxy := NewProxy(&http.Client{}, Timeouts{
+		TTFT:    cfg.Resilience.TTFTTimeout.Duration,
+		Request: cfg.Resilience.RequestTimeout.Duration,
+	}, discardLogger())
+
+	if opts.maxAttempts == 0 {
+		opts.maxAttempts = 1 // most tests assert single-attempt behavior
+	}
+	breakers := NewBreakers(pool, cfg.Resilience.Breaker)
+	budget := resilience.NewRetryBudget(resilience.RetryBudgetOptions{
+		Percent: cfg.Resilience.RetryBudgetPct, MinRetriesPerSecond: 100,
+	})
+	f.breakers = breakers
+	f.budget = budget
+
+	dispatcher := NewDispatcher(DispatcherOptions{
+		Pool: pool, Router: rt, Proxy: proxy,
+		Breakers:    breakers,
+		Budget:      budget,
+		Backoff:     resilience.NewBackoff(time.Millisecond, 5*time.Millisecond),
+		MaxAttempts: opts.maxAttempts,
+		Logger:      discardLogger(),
+	})
+
 	srv := NewServer(Options{
-		Config: cfg,
-		Pool:   pool,
-		Router: rt,
-		Proxy: NewProxy(&http.Client{}, Timeouts{
-			TTFT:    cfg.Resilience.TTFTTimeout.Duration,
-			Request: cfg.Resilience.RequestTimeout.Duration,
-		}, discardLogger()),
-		Admission: admitter,
-		Estimator: est,
-		Logger:    discardLogger(),
-		Version:   "test",
+		Config:     cfg,
+		Pool:       pool,
+		Router:     rt,
+		Proxy:      proxy,
+		Dispatcher: dispatcher,
+		Breakers:   breakers,
+		Budget:     budget,
+		Admission:  admitter,
+		Estimator:  est,
+		Logger:     discardLogger(),
+		Version:    "test",
 	})
 
 	f.gateway = httptest.NewServer(srv.Handler())
@@ -740,3 +768,6 @@ func TestEstimateTokensIncludesOutputBudget(t *testing.T) {
 		t.Error("a large max_tokens must raise the estimated cost")
 	}
 }
+
+// bytesReader is a small helper so tests can post pre-marshaled payloads.
+func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }

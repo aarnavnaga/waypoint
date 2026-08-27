@@ -367,3 +367,109 @@ The eligible set is recomputed per request (health, breaker state, capacity, mod
 it changes rarely. Rebuilding a 450–1500 point sorted ring on every request would be
 real hot-path cost for no benefit, so the ring is memoized behind an atomic pointer keyed
 by a fingerprint of the backend names. A set change transparently rebuilds exactly once.
+
+---
+
+## 7. M4 decisions — resilience
+
+### D19 — `Permits()` and `Allow()` are separate breaker operations
+
+**This was a real bug that wedged the breaker permanently.**
+
+The breaker originally exposed only `Allow()`, which both answers "may I send?"
+*and* consumes one of the limited half-open probe slots. `backend.Available()` was wired
+to it, so the router called `Allow()` for **every backend on every request** while
+filtering candidates — including backends it then did not dispatch to.
+
+The consequence: within a few requests, all half-open probe slots were consumed by
+eligibility checks that never produced a matching `Record()`. With no results arriving,
+`halfOpenSucceeded` never reached its threshold, `Allow()` refused everything, and the
+breaker sat in half-open forever. A backend that had fully recovered could never return
+to rotation. `TestBreakerRecoversAfterBackendHeals` caught it;
+`TestPermitsDoesNotConsumeProbeSlots` now pins the invariant.
+
+The fix separates the two concerns:
+
+- `Permits()` — a pure query, used for candidate filtering. No mutation, safe to call
+  thousands of times.
+- `Allow()` — reserves a probe slot, called exactly once at dispatch, and obliges the
+  caller to call `Record()`.
+
+The general lesson: **a method that both answers a question and mutates state cannot be
+used for speculative evaluation**, and routing is inherently speculative — it asks every
+candidate before choosing one.
+
+### D20 — Retry budget, not just capped attempts
+
+Capping attempts at 3 bounds *one request's* amplification but not the *fleet's*. If a
+backend starts failing everything, every request retries, and the fleet instantly emits
+3x its normal rate at a system already in trouble. That is how a partial outage becomes
+a total one.
+
+The budget is a token bucket: each request deposits `retry_budget_pct/100` tokens, each
+retry withdraws one. When failures are rare — the case retries are actually *for* —
+budget is always available. When failures are widespread the budget empties and retries
+stop. `TestRetryBudgetStopsRetryStorm` drives 1,000 requests where every attempt fails
+and measures a retries/requests ratio of **0.099** against a configured 10%, versus 2.0
+with no budget.
+
+Tokens decay over a TTL so a quiet period cannot bank budget to fund a later burst, and
+accumulation is capped for the same reason.
+
+**Open question resolved from M0:** the budget is per-replica, not Redis-shared. Sharing
+it would add a network round trip to the failure path — precisely when the system is
+least healthy — and the guarantee it buys (exact global ratio) is not worth it. With N
+replicas each enforcing the ratio locally, the fleet-wide ratio is the same in
+expectation.
+
+### D21 — Full jitter on backoff
+
+Delay is drawn uniformly from `[0, min(max, base·2^attempt))` rather than being set to
+the cap. If every client that failed at the same instant waits the same backoff, they
+all retry at the same instant too, reproducing the burst that caused the failure. Full
+jitter decorrelates them. `TestBackoffFullJitterSpreadsDelays` asserts the draws
+actually span the interval instead of clustering.
+
+### D22 — Client cancellation is not a backend failure
+
+When a client hangs up mid-stream the dispatcher records *nothing* against the breaker.
+Counting it would mean a burst of impatient clients — or one aggressive client timeout
+setting — could trip every breaker in the fleet and cause a real outage from a
+non-problem. `TestClientCancellationDoesNotTripBreaker` drives 30 abandoned streams and
+asserts the breaker stays closed.
+
+The same reasoning applies to active health probes: a probe aborted because the
+*gateway* is shutting down is discarded rather than recorded, so a restart does not
+leave every backend marked unhealthy on the way out.
+
+### D23 — Active probing and passive breakers are both required
+
+They answer different questions and neither subsumes the other.
+
+A circuit breaker observes **real traffic**, so it detects failures that only appear
+under load — the kind a `/healthz` endpoint returning 200 will never reveal. But it has
+a blind spot: once it opens, it stops sending traffic, so it has no way to learn that
+the backend recovered. That is what the half-open probe is for, and it is a deliberately
+thin trickle.
+
+An active health checker probes **regardless of traffic**, so it can notice recovery on
+a backend nobody is using. But it only sees whatever the probe endpoint reports, which
+is usually a trivial handler that stays healthy while the inference path is broken.
+
+Health flips require N *consecutive* agreeing probes, not one. A single probe is a noisy
+sample, and flipping a backend out of rotation on one timeout makes traffic oscillate —
+which is itself a cause of timeouts.
+
+### Measured resilience behavior (Toxiproxy, 3 backends)
+
+| Scenario | Result |
+|---|---|
+| One backend killed mid-run (transport severed) | **100%** availability (30/30) |
+| One backend +2s latency, 1.5s TTFT deadline | 15/15 succeeded, worst latency **1.52s** |
+| Breaker trip against a dead backend | opened after **13** requests |
+| Breaker recovery after backend restored | closed **2.56s** after opening |
+| One backend at a 30% error rate, 3 attempts | **100%** availability |
+
+Toxiproxy covers transport faults (severed connections, added latency); the mock
+backend's own knobs cover application faults (HTTP 500s, accept-then-stall) that a
+TCP-level proxy cannot synthesize.

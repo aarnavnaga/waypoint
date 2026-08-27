@@ -30,6 +30,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/config"
 	"github.com/aarnavnaga/waypoint/internal/mocksim"
 	"github.com/aarnavnaga/waypoint/internal/openai"
+	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
 	"github.com/aarnavnaga/waypoint/internal/sse"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
@@ -46,6 +47,7 @@ type stack struct {
 	engines    []*mocksim.Engine
 	pool       *backend.Pool
 	router     *router.Router
+	breakers   *api.Breakers
 	client     *http.Client
 }
 
@@ -107,15 +109,34 @@ func newStack(t *testing.T, backendCount int, mutate func(*mocksim.Config)) *sta
 	})
 	disc.RefreshAll(context.Background())
 
+	proxy := api.NewProxy(&http.Client{}, api.Timeouts{TTFT: 3 * time.Second}, quietLogger())
+	breakers := api.NewBreakers(pool, cfg.Resilience.Breaker)
+	budget := resilience.NewRetryBudget(resilience.RetryBudgetOptions{
+		Percent: cfg.Resilience.RetryBudgetPct, MinRetriesPerSecond: 100,
+	})
+	s.breakers = breakers
+
+	dispatcher := api.NewDispatcher(api.DispatcherOptions{
+		Pool: pool, Router: rt, Proxy: proxy,
+		Breakers:    breakers,
+		Budget:      budget,
+		Backoff:     resilience.NewBackoff(time.Millisecond, 10*time.Millisecond),
+		MaxAttempts: cfg.Resilience.MaxAttempts,
+		Logger:      quietLogger(),
+	})
+
 	srv := api.NewServer(api.Options{
-		Config:    cfg,
-		Pool:      pool,
-		Router:    rt,
-		Proxy:     api.NewProxy(&http.Client{}, api.Timeouts{TTFT: 3 * time.Second}, quietLogger()),
-		Admission: admission.New(admission.Options{MaxConcurrent: 64, MaxQueue: 256}),
-		Estimator: est,
-		Logger:    quietLogger(),
-		Version:   "integration",
+		Config:     cfg,
+		Pool:       pool,
+		Router:     rt,
+		Proxy:      proxy,
+		Dispatcher: dispatcher,
+		Breakers:   breakers,
+		Budget:     budget,
+		Admission:  admission.New(admission.Options{MaxConcurrent: 64, MaxQueue: 256}),
+		Estimator:  est,
+		Logger:     quietLogger(),
+		Version:    "integration",
 	})
 
 	// Bind a real listener so the gateway is reached over TCP, not in-process.

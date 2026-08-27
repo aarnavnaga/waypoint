@@ -15,6 +15,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/backend"
 	"github.com/aarnavnaga/waypoint/internal/config"
 	"github.com/aarnavnaga/waypoint/internal/openai"
+	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
 )
@@ -27,13 +28,16 @@ type Readiness interface {
 
 // Options configures a Server.
 type Options struct {
-	Config    config.Config
-	Pool      *backend.Pool
-	Router    *router.Router
-	Proxy     *Proxy
-	Admission *admission.Controller
-	Estimator tokenizer.Estimator
-	Logger    *slog.Logger
+	Config     config.Config
+	Pool       *backend.Pool
+	Router     *router.Router
+	Proxy      *Proxy
+	Dispatcher *Dispatcher
+	Breakers   *Breakers
+	Budget     *resilience.RetryBudget
+	Admission  *admission.Controller
+	Estimator  tokenizer.Estimator
+	Logger     *slog.Logger
 	// Redis is optional; when set, /readyz requires it to be reachable.
 	Redis Readiness
 	// Version is reported by /healthz.
@@ -42,15 +46,18 @@ type Options struct {
 
 // Server is the gateway's HTTP handler set.
 type Server struct {
-	cfg       config.Config
-	pool      *backend.Pool
-	router    *router.Router
-	proxy     *Proxy
-	admission *admission.Controller
-	estimator tokenizer.Estimator
-	logger    *slog.Logger
-	redis     Readiness
-	version   string
+	cfg        config.Config
+	pool       *backend.Pool
+	router     *router.Router
+	proxy      *Proxy
+	dispatcher *Dispatcher
+	breakers   *Breakers
+	budget     *resilience.RetryBudget
+	admission  *admission.Controller
+	estimator  tokenizer.Estimator
+	logger     *slog.Logger
+	redis      Readiness
+	version    string
 
 	// apiKeys is a set for O(1) lookup; empty disables authentication.
 	apiKeys map[string]struct{}
@@ -67,22 +74,40 @@ func NewServer(opts Options) *Server {
 		est = tokenizer.NewCharHeuristic()
 	}
 
+	// A nil Dispatcher would panic on the first request. Build a single-attempt
+	// one so a partially configured server degrades to "no retries" rather than
+	// to a crash loop.
+	dispatcher := opts.Dispatcher
+	if dispatcher == nil {
+		dispatcher = NewDispatcher(DispatcherOptions{
+			Pool:        opts.Pool,
+			Router:      opts.Router,
+			Proxy:       opts.Proxy,
+			Breakers:    opts.Breakers,
+			MaxAttempts: 1,
+			Logger:      logger,
+		})
+	}
+
 	keys := make(map[string]struct{}, len(opts.Config.Auth.APIKeys))
 	for _, k := range opts.Config.Auth.APIKeys {
 		keys[k] = struct{}{}
 	}
 
 	return &Server{
-		cfg:       opts.Config,
-		pool:      opts.Pool,
-		router:    opts.Router,
-		proxy:     opts.Proxy,
-		admission: opts.Admission,
-		estimator: est,
-		logger:    logger,
-		redis:     opts.Redis,
-		version:   opts.Version,
-		apiKeys:   keys,
+		cfg:        opts.Config,
+		pool:       opts.Pool,
+		router:     opts.Router,
+		proxy:      opts.Proxy,
+		dispatcher: dispatcher,
+		breakers:   opts.Breakers,
+		budget:     opts.Budget,
+		admission:  opts.Admission,
+		estimator:  est,
+		logger:     logger,
+		redis:      opts.Redis,
+		version:    opts.Version,
+		apiKeys:    keys,
 	}
 }
 
@@ -238,11 +263,18 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, _ *http.Request) {
 		stats = append(stats, b.Stats())
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"policy":    s.router.PolicyName(),
 		"backends":  stats,
 		"admission": s.admission.Stats(),
-	})
+	}
+	if s.breakers != nil {
+		body["breakers"] = s.breakers.Stats()
+	}
+	if s.budget != nil {
+		body["retry_budget"] = s.budget.Stats()
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {

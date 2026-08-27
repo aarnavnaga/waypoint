@@ -18,6 +18,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/api"
 	"github.com/aarnavnaga/waypoint/internal/backend"
 	"github.com/aarnavnaga/waypoint/internal/config"
+	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
 )
@@ -82,15 +83,50 @@ func run() error {
 		Logger:   logger,
 	})
 
+	breakers := api.NewBreakers(pool, cfg.Resilience.Breaker)
+
+	budget := resilience.NewRetryBudget(resilience.RetryBudgetOptions{
+		Percent:             cfg.Resilience.RetryBudgetPct,
+		MinRetriesPerSecond: 1,
+		TTL:                 10 * time.Second,
+	})
+
+	dispatcher := api.NewDispatcher(api.DispatcherOptions{
+		Pool:     pool,
+		Router:   rt,
+		Proxy:    proxy,
+		Breakers: breakers,
+		Budget:   budget,
+		Backoff: resilience.NewBackoff(
+			cfg.Resilience.Backoff.Base.Duration,
+			cfg.Resilience.Backoff.Max.Duration,
+		),
+		MaxAttempts: cfg.Resilience.MaxAttempts,
+		Logger:      logger,
+	})
+
+	healthChecker := resilience.NewHealthChecker(pool, resilience.HealthCheckerOptions{
+		Interval:           cfg.Resilience.HealthCheck.Interval.Duration,
+		Timeout:            cfg.Resilience.HealthCheck.Timeout.Duration,
+		Path:               cfg.Resilience.HealthCheck.Path,
+		HealthyThreshold:   cfg.Resilience.HealthCheck.HealthyThreshold,
+		UnhealthyThreshold: cfg.Resilience.HealthCheck.UnhealthyThreshold,
+		Client:             upstream,
+		Logger:             logger,
+	})
+
 	server := api.NewServer(api.Options{
-		Config:    cfg,
-		Pool:      pool,
-		Router:    rt,
-		Proxy:     proxy,
-		Admission: admitter,
-		Estimator: estimator,
-		Logger:    logger,
-		Version:   version,
+		Config:     cfg,
+		Pool:       pool,
+		Router:     rt,
+		Proxy:      proxy,
+		Dispatcher: dispatcher,
+		Breakers:   breakers,
+		Budget:     budget,
+		Admission:  admitter,
+		Estimator:  estimator,
+		Logger:     logger,
+		Version:    version,
 	})
 
 	srv := &http.Server{
@@ -116,6 +152,9 @@ func run() error {
 
 	// Discover which models each backend serves, and keep it current.
 	go discoverer.Run(ctx)
+	// Active probing complements the breakers' passive signal: a breaker cannot
+	// notice recovery on a backend it has stopped sending traffic to.
+	go healthChecker.Run(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
