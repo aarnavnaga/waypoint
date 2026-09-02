@@ -25,6 +25,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rate limiting runs first, before admission and routing. A request that is
+	// over quota should cost the gateway as little as possible — admitting it
+	// into the queue would let an over-quota tenant occupy capacity that paying
+	// traffic needs.
+	estTokens := s.router.EstimateTokens(req)
+	if !s.checkRateLimit(w, r, estTokens) {
+		return
+	}
+
 	// Admission control runs before routing: if the gateway cannot serve the
 	// request at all, there is no point choosing who would have served it.
 	ticket, err := s.admission.Acquire(ctx, admission.ClassInteractive)

@@ -15,6 +15,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/backend"
 	"github.com/aarnavnaga/waypoint/internal/config"
 	"github.com/aarnavnaga/waypoint/internal/openai"
+	"github.com/aarnavnaga/waypoint/internal/ratelimit"
 	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
@@ -36,6 +37,7 @@ type Options struct {
 	Breakers   *Breakers
 	Budget     *resilience.RetryBudget
 	Admission  *admission.Controller
+	Limiter    ratelimit.Limiter
 	Estimator  tokenizer.Estimator
 	Logger     *slog.Logger
 	// Redis is optional; when set, /readyz requires it to be reachable.
@@ -54,6 +56,7 @@ type Server struct {
 	breakers   *Breakers
 	budget     *resilience.RetryBudget
 	admission  *admission.Controller
+	limiter    ratelimit.Limiter
 	estimator  tokenizer.Estimator
 	logger     *slog.Logger
 	redis      Readiness
@@ -89,6 +92,13 @@ func NewServer(opts Options) *Server {
 		})
 	}
 
+	// Rate limiting defaults to permissive so a partially configured server
+	// still serves rather than denying everything.
+	limiter := opts.Limiter
+	if limiter == nil {
+		limiter = ratelimit.AllowAll{}
+	}
+
 	keys := make(map[string]struct{}, len(opts.Config.Auth.APIKeys))
 	for _, k := range opts.Config.Auth.APIKeys {
 		keys[k] = struct{}{}
@@ -103,6 +113,7 @@ func NewServer(opts Options) *Server {
 		breakers:   opts.Breakers,
 		budget:     opts.Budget,
 		admission:  opts.Admission,
+		limiter:    limiter,
 		estimator:  est,
 		logger:     logger,
 		redis:      opts.Redis,

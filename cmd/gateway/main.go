@@ -18,6 +18,8 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/api"
 	"github.com/aarnavnaga/waypoint/internal/backend"
 	"github.com/aarnavnaga/waypoint/internal/config"
+	"github.com/aarnavnaga/waypoint/internal/ratelimit"
+	"github.com/aarnavnaga/waypoint/internal/redisclient"
 	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
@@ -83,6 +85,23 @@ func run() error {
 		Logger:   logger,
 	})
 
+	// Redis backs rate limits and caches. It is created unconditionally so
+	// /readyz can report on it, but nothing blocks startup on it being up:
+	// the gateway must be able to start during a Redis outage.
+	rdb := redisclient.New(cfg.Redis)
+	defer func() { _ = rdb.Close() }()
+
+	var limiter ratelimit.Limiter = ratelimit.AllowAll{}
+	if cfg.RateLimit.Enabled {
+		limiter = ratelimit.NewRedisLimiter(rdb, ratelimit.Options{
+			RPM:       int64(cfg.RateLimit.RPM),
+			TPM:       int64(cfg.RateLimit.TPM),
+			FailOpen:  cfg.RateLimit.FailOpen,
+			KeyPrefix: cfg.Redis.KeyPrefix,
+			Timeout:   cfg.Redis.Timeout.Duration,
+		})
+	}
+
 	breakers := api.NewBreakers(pool, cfg.Resilience.Breaker)
 
 	budget := resilience.NewRetryBudget(resilience.RetryBudgetOptions{
@@ -124,8 +143,10 @@ func run() error {
 		Breakers:   breakers,
 		Budget:     budget,
 		Admission:  admitter,
+		Limiter:    limiter,
 		Estimator:  estimator,
 		Logger:     logger,
+		Redis:      rdb,
 		Version:    version,
 	})
 
@@ -145,6 +166,8 @@ func run() error {
 		"port", cfg.Server.Port,
 		"max_concurrent", cfg.Server.MaxConcurrent,
 		"max_queue", cfg.Server.MaxQueue,
+		"ratelimit_enabled", cfg.RateLimit.Enabled,
+		"ratelimit_fail_open", cfg.RateLimit.FailOpen,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

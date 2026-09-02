@@ -638,3 +638,6 @@ func TestLoadAwareAffinityServesUnderImbalance(t *testing.T) {
 		t.Errorf("load-aware policy sent %d requests to the saturated backend", seen["mock-1"])
 	}
 }
+
+// bytesReaderOf wraps a payload for request construction.
+func bytesReaderOf(b []byte) io.Reader { return bytes.NewReader(b) }

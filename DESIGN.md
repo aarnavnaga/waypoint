@@ -473,3 +473,76 @@ which is itself a cause of timeouts.
 Toxiproxy covers transport faults (severed connections, added latency); the mock
 backend's own knobs cover application faults (HTTP 500s, accept-then-stall) that a
 TCP-level proxy cannot synthesize.
+
+---
+
+## 8. M5 decisions — distributed rate limiting
+
+### D24 — The token bucket is a Redis Lua script, not GET/compute/SET
+
+**Chosen:** one atomic Lua script evaluating and debiting both buckets.
+
+**Why:** with a read-modify-write sequence, two replicas checking the same key
+concurrently both read the old value, both conclude they are under the limit, and both
+admit. With N replicas under load the effective limit becomes some multiple of the
+configured one, and it is not even a stable multiple — it depends on contention. Redis
+runs scripts atomically on a single thread, so check-and-decrement cannot interleave.
+
+Measured: `TestRateLimitHoldsAcrossTwoReplicas` drives 200 requests through two
+independent gateway processes sharing one key against an RPM of 40, and gets **exactly
+40 allowed, 160 limited**. `TestConcurrentCallersDoNotOverAdmit` releases 100 goroutines
+simultaneously against a bucket of 20 and admits at most 23.
+
+### D25 — Both limits are evaluated before either is debited
+
+A request that fails the *token* limit must not consume *request* budget. Otherwise a
+client that is persistently over its token quota would also drain its request bucket
+with calls that were never served — being punished twice for one rejection, and taking
+longer to recover than the limit intends. The script computes both verdicts first, then
+debits only on success. `TestDeniedRequestDoesNotConsumeOtherBucket` pins this.
+
+### D26 — Token bucket over fixed or sliding window counters
+
+**Chosen:** token bucket (capacity + refill rate).
+
+**Alternatives:** fixed-window counters, sliding-window log.
+
+**Why:** fixed windows allow a 2x burst across a boundary — a client can spend its whole
+minute's budget in the last second of one window and again in the first second of the
+next. A sliding-window log is exact but stores a timestamp per request, which is
+unbounded memory per key. A token bucket bounds burst to the bucket capacity, refills
+smoothly rather than in steps, and stores two numbers per key regardless of traffic.
+
+Buckets start **full**, so a first-time caller is not penalized for having no history.
+
+### D27 — Fail open by default
+
+When Redis is unreachable the limiter returns the configured verdict and marks the
+decision `Degraded`.
+
+**Why open:** rate limits exist to protect backend capacity from abuse. Failing closed
+converts a Redis outage — a degradation of a *protective* subsystem — into a total
+serving outage for every tenant. An unprotected but working API is nearly always better
+than a protected but dead one, and the backends still have their own admission control
+and breakers as a second line of defense.
+
+**When closed is right:** if the limit encodes a billing or safety boundary rather than
+a capacity guard, over-serving may be worse than not serving, so the behavior is
+configurable.
+
+This only works if failure is detected *fast* — a fail-open limiter that still waits a
+5-second Redis timeout has added 5 seconds to every request during the outage. Redis
+timeouts are therefore short (200ms default) and `TestRedisFailureIsFast` asserts it.
+
+### D28 — Rate limiting runs before admission control
+
+An over-quota request should cost as little as possible. Admitting it into the queue
+first would let an over-quota tenant occupy concurrency slots that paying traffic needs,
+which is backwards — the cheapest possible rejection is the point.
+
+### D29 — Keyed by API key, falling back to client IP
+
+With authentication enabled the key is the tenant. With it disabled there is no tenant
+to attribute usage to, so the limiter falls back to the peer address (honoring
+`X-Forwarded-For` from a trusted LB). Coarse, but far better than a single global bucket
+in which one noisy caller starves everyone.
