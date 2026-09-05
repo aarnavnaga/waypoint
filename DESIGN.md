@@ -546,3 +546,99 @@ With authentication enabled the key is the tenant. With it disabled there is no 
 to attribute usage to, so the limiter falls back to the peer address (honoring
 `X-Forwarded-For` from a trusted LB). Coarse, but far better than a single global bucket
 in which one noisy caller starves everyone.
+
+---
+
+## 9. M6 decisions — caching
+
+### D30 — Exact first, then semantic
+
+Exact lookup is one Redis `GET`. Semantic lookup costs an embedding round trip plus a
+vector search, and carries a correctness risk exact matching does not have. There is
+never a case where trying semantic first is better, so the order is fixed.
+
+### D31 — Only `temperature == 0` is cacheable
+
+This is a **correctness** rule, not an optimization. Above temperature 0 the model is
+sampling: two identical requests are *supposed* to produce different answers, and that
+variation is what the caller asked for. Serving a cached response silently removes it.
+A request with no temperature at all defaults to 1.0 and is therefore not cacheable
+either — a subtlety worth stating, because "they didn't set it" is easy to mistake for
+"they don't care".
+
+### D32 — Cache-key normalization is deliberately conservative
+
+Only leading/trailing whitespace is trimmed. Case, punctuation and internal spacing are
+preserved, because a model can legitimately answer differently for each.
+
+The asymmetry drives this: **a missed hit costs latency; a wrong hit returns an answer to
+a question the user did not ask.** Aggressive normalization buys a slightly better hit
+rate by taking on correctness risk, which is the wrong trade for a cache in front of a
+model. `TestExactKeyPreservesMeaningfulDifferences` pins it.
+
+`stream` is excluded from the key: the content is identical and only the framing
+differs, so both forms should share one entry.
+
+### D33 — Chunk boundaries are stored, not just the joined text
+
+An entry keeps the original per-token fragments so a cached streaming response replays
+with the same granularity a live one had. Storing only the joined string would make
+cached responses arrive as one giant chunk — observably different for any client that
+renders incrementally, and a regression users would notice as "the cache makes it feel
+worse even though it's faster".
+
+### D34 — Semantic cache guards: similarity is necessary but not sufficient
+
+A semantic hit requires **all** of: identical model, identical sampling parameters,
+identical preceding conversation context, and similarity above the threshold. Only the
+final user message is compared by embedding.
+
+Why only the final message: embedding the whole conversation lets a long shared history
+dominate the vector, so two unrelated questions after the same 2,000-token system prompt
+look nearly identical. The preceding context is folded in as an exact-match hash instead,
+which is strictly safer — different conversations can never collide even if their last
+messages are identical.
+
+Why parameters must match: a cached greedy answer is not a valid response to a request
+with different decoding settings, however similar the question.
+
+### D35 — FLAT vector index over HNSW
+
+A response cache holds thousands of entries, not millions. At that size an exhaustive
+scan is fast and exact, while HNSW adds recall tuning (`M`, `efConstruction`,
+`efRuntime`) and the possibility of silently missing a valid neighbor. HNSW becomes the
+right call an order of magnitude higher.
+
+### D36 — Cache writes are asynchronous and failures are always non-fatal
+
+The client already has its bytes when the write happens, so storing must never be on the
+path that delays them. Writes use a **detached context**: the request context is
+cancelled the instant the handler returns, so inheriting it would abort essentially every
+cache write.
+
+Every cache failure — Redis down, embedder timing out, a corrupt stored entry —
+degrades to a miss. A cache that can take down the service it accelerates is worse than
+no cache at all.
+
+### D37 — Response capture tees rather than buffers
+
+Caching a streamed response requires observing it in flight, because it is written
+incrementally and is gone once sent. `captureWriter` forwards bytes to the client
+*first*, then parses the SSE it saw. Buffering the whole response to cache it afterwards
+would convert streaming into non-streaming, destroying the property M2 exists to provide.
+
+Two details this requires: writes do not align with event boundaries, so parsing happens
+up to the last complete `\n\n` with the remainder kept pending; and the wrapper must
+implement `Flush()`, or wrapping the `ResponseWriter` silently disables streaming.
+
+Capture is skipped entirely when the request is not cacheable, so the common
+`temperature > 0` path pays nothing.
+
+### Measured cache behavior
+
+| Measurement | Result |
+|---|---|
+| Exact hit vs. live request (non-streaming) | **25.9x faster** (51.3ms → 2.0ms) |
+| Cached streaming replay | 10 of 10 original chunk boundaries preserved |
+| Backend requests served on a cache hit | **0** |
+| Semantic hit on a reworded question | similarity **0.849** (threshold 0.6) |

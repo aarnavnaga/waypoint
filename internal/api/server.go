@@ -13,6 +13,7 @@ import (
 
 	"github.com/aarnavnaga/waypoint/internal/admission"
 	"github.com/aarnavnaga/waypoint/internal/backend"
+	"github.com/aarnavnaga/waypoint/internal/cache"
 	"github.com/aarnavnaga/waypoint/internal/config"
 	"github.com/aarnavnaga/waypoint/internal/openai"
 	"github.com/aarnavnaga/waypoint/internal/ratelimit"
@@ -38,6 +39,7 @@ type Options struct {
 	Budget     *resilience.RetryBudget
 	Admission  *admission.Controller
 	Limiter    ratelimit.Limiter
+	Cache      *cache.Cache
 	Estimator  tokenizer.Estimator
 	Logger     *slog.Logger
 	// Redis is optional; when set, /readyz requires it to be reachable.
@@ -57,6 +59,7 @@ type Server struct {
 	budget     *resilience.RetryBudget
 	admission  *admission.Controller
 	limiter    ratelimit.Limiter
+	cache      *cache.Cache
 	estimator  tokenizer.Estimator
 	logger     *slog.Logger
 	redis      Readiness
@@ -114,6 +117,7 @@ func NewServer(opts Options) *Server {
 		budget:     opts.Budget,
 		admission:  opts.Admission,
 		limiter:    limiter,
+		cache:      opts.Cache,
 		estimator:  est,
 		logger:     logger,
 		redis:      opts.Redis,
@@ -284,6 +288,9 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.budget != nil {
 		body["retry_budget"] = s.budget.Stats()
+	}
+	if s.cache != nil {
+		body["cache"] = s.cache.Stats()
 	}
 	writeJSON(w, http.StatusOK, body)
 }

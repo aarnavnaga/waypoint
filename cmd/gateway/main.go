@@ -17,6 +17,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/admission"
 	"github.com/aarnavnaga/waypoint/internal/api"
 	"github.com/aarnavnaga/waypoint/internal/backend"
+	"github.com/aarnavnaga/waypoint/internal/cache"
 	"github.com/aarnavnaga/waypoint/internal/config"
 	"github.com/aarnavnaga/waypoint/internal/ratelimit"
 	"github.com/aarnavnaga/waypoint/internal/redisclient"
@@ -102,6 +103,8 @@ func run() error {
 		})
 	}
 
+	responseCache := buildCache(ctxBackground(), cfg, rdb, logger)
+
 	breakers := api.NewBreakers(pool, cfg.Resilience.Breaker)
 
 	budget := resilience.NewRetryBudget(resilience.RetryBudgetOptions{
@@ -144,6 +147,7 @@ func run() error {
 		Budget:     budget,
 		Admission:  admitter,
 		Limiter:    limiter,
+		Cache:      responseCache,
 		Estimator:  estimator,
 		Logger:     logger,
 		Redis:      rdb,
@@ -168,6 +172,8 @@ func run() error {
 		"max_queue", cfg.Server.MaxQueue,
 		"ratelimit_enabled", cfg.RateLimit.Enabled,
 		"ratelimit_fail_open", cfg.RateLimit.FailOpen,
+		"cache_enabled", cfg.Cache.Enabled,
+		"semantic_cache", cfg.Cache.Semantic.Enabled,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -249,4 +255,52 @@ func newLogger(level string) *slog.Logger {
 			return a
 		},
 	}))
+}
+
+// ctxBackground is a tiny helper so buildCache reads clearly at the call site.
+func ctxBackground() context.Context { return context.Background() }
+
+// buildCache assembles the response cache from configuration.
+//
+// Every failure here is non-fatal. A gateway that refuses to start because its
+// *cache* is unavailable has turned an optimization into a dependency, which is
+// exactly backwards.
+func buildCache(ctx context.Context, cfg config.Config, rdb *redisclient.Client, logger *slog.Logger) *cache.Cache {
+	if !cfg.Cache.Enabled {
+		return cache.New(cache.Options{Logger: logger})
+	}
+
+	exact := cache.NewExactCache(rdb, cache.ExactOptions{
+		TTL:       cfg.Cache.ExactTTL.Duration,
+		KeyPrefix: cfg.Redis.KeyPrefix,
+		Timeout:   cfg.Redis.Timeout.Duration,
+	})
+
+	opts := cache.Options{Exact: exact, Logger: logger}
+
+	if cfg.Cache.Semantic.Enabled {
+		embedder := cache.NewHTTPEmbedder(cache.EmbedderOptions{
+			BaseURL:    cfg.Cache.Semantic.EmbedderURL,
+			Dimensions: cfg.Cache.Semantic.Dimensions,
+			Timeout:    cfg.Cache.Semantic.EmbedTimeout.Duration,
+		})
+
+		semantic := cache.NewSemanticCache(rdb, cache.SemanticOptions{
+			Embedder:  embedder,
+			IndexName: cfg.Cache.Semantic.IndexName,
+			KeyPrefix: cfg.Redis.KeyPrefix,
+			Threshold: cfg.Cache.Semantic.Threshold,
+			TopK:      cfg.Cache.Semantic.TopK,
+			TTL:       cfg.Cache.Semantic.TTL.Duration,
+		})
+
+		if err := semantic.EnsureIndex(ctx); err != nil {
+			logger.Warn("semantic cache index unavailable; continuing with exact cache only",
+				"error", err)
+		} else {
+			opts.Semantic = semantic
+		}
+	}
+
+	return cache.New(opts)
 }

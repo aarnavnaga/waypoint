@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/aarnavnaga/waypoint/internal/admission"
+	"github.com/aarnavnaga/waypoint/internal/cache"
 	"github.com/aarnavnaga/waypoint/internal/openai"
 	"github.com/aarnavnaga/waypoint/internal/router"
 )
@@ -50,6 +51,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ticket.Release()
 
+	// Cache lookup happens after admission (so a cache stampede cannot bypass
+	// overload protection) but before routing (a hit needs no backend).
+	bypass := cache.BypassRequested(r.Header.Get("X-Waypoint-Cache"))
+	if s.cache.Enabled() && !bypass {
+		if entry, err := s.cache.Lookup(ctx, req); err == nil {
+			s.serveFromCache(w, req, entry)
+			return
+		}
+	}
+	if bypass {
+		w.Header().Set("X-Waypoint-Cache", cache.SourceBypass)
+	} else if s.cache.Enabled() {
+		w.Header().Set("X-Waypoint-Cache", cache.SourceMiss)
+	}
+
 	routeReq := s.router.BuildRequest(req)
 
 	if len(s.pool.Available(req.Model)) == 0 {
@@ -71,7 +87,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.budget.Deposit()
 	}
 
-	result, err := s.dispatcher.Do(ctx, w, req, routeReq, body, passthroughHeaders(r))
+	// Capture the response so a successful completion can be cached. Capture is
+	// skipped entirely when caching cannot apply, so the common uncacheable
+	// path (temperature > 0) pays nothing.
+	captureResponse := s.cache.Enabled() && cache.Cacheable(req)
+	writer := w
+	var capture *captureWriter
+	if captureResponse {
+		capture = newCaptureWriter(w)
+		writer = capture
+	}
+
+	result, err := s.dispatcher.Do(ctx, writer, req, routeReq, body, passthroughHeaders(r))
 	if err != nil {
 		started := result != nil && result.Outcome != nil && result.Outcome.ResponseStarted
 		s.logger.Warn("dispatch failed",
@@ -95,6 +122,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		status, typ := errorStatus(err)
 		writeAPIError(w, status, err.Error(), typ, "")
 		return
+	}
+
+	if capture != nil && result.Outcome != nil {
+		s.storeInCache(req, capture, result.Outcome)
 	}
 
 	s.logger.Debug("dispatch complete",
