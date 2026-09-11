@@ -11,10 +11,10 @@ import (
 )
 
 // checkRateLimit consumes budget for the request and writes a 429 if denied.
-// It reports whether the request may proceed.
-func (s *Server) checkRateLimit(w http.ResponseWriter, r *http.Request, estTokens int64) bool {
+// It reports whether the request may proceed, and which resource bound.
+func (s *Server) checkRateLimit(w http.ResponseWriter, r *http.Request, estTokens int64) (allowed bool, resource string) {
 	if !s.cfg.RateLimit.Enabled {
-		return true
+		return true, ""
 	}
 
 	// Limits are keyed by API key. With authentication disabled there is no
@@ -29,14 +29,14 @@ func (s *Server) checkRateLimit(w http.ResponseWriter, r *http.Request, estToken
 	if err != nil {
 		// A degraded decision still carries the configured fail-open or
 		// fail-closed verdict; log once and honor it.
-		s.logger.Warn("rate limiter degraded",
+		s.logger.WarnContext(r.Context(), "rate limiter degraded",
 			"error", err, "fail_open", s.cfg.RateLimit.FailOpen, "allowed", decision.Allowed)
 	}
 
 	writeRateLimitHeaders(w, decision)
 
 	if decision.Allowed {
-		return true
+		return true, ""
 	}
 
 	retryAfter := decision.RetryAfter
@@ -57,7 +57,7 @@ func (s *Server) checkRateLimit(w http.ResponseWriter, r *http.Request, estToken
 	writeAPIError(w, http.StatusTooManyRequests,
 		"rate limit exceeded for "+decision.Resource+"; retry in "+strconv.Itoa(seconds)+"s",
 		openai.ErrTypeRateLimit, "rate_limit_exceeded")
-	return false
+	return false, decision.Resource
 }
 
 // writeRateLimitHeaders emits the conventional X-RateLimit-* headers so clients

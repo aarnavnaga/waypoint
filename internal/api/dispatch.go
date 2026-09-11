@@ -11,6 +11,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/openai"
 	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
+	"github.com/aarnavnaga/waypoint/internal/telemetry"
 )
 
 // Dispatcher turns one client request into up to MaxAttempts backend attempts,
@@ -24,6 +25,7 @@ type Dispatcher struct {
 	backoff  *resilience.Backoff
 
 	maxAttempts int
+	metrics     *telemetry.Metrics
 	logger      *slog.Logger
 }
 
@@ -36,6 +38,7 @@ type DispatcherOptions struct {
 	Budget      *resilience.RetryBudget
 	Backoff     *resilience.Backoff
 	MaxAttempts int
+	Metrics     *telemetry.Metrics
 	Logger      *slog.Logger
 }
 
@@ -55,6 +58,7 @@ func NewDispatcher(opts DispatcherOptions) *Dispatcher {
 		budget:      opts.Budget,
 		backoff:     opts.Backoff,
 		maxAttempts: opts.MaxAttempts,
+		metrics:     opts.Metrics,
 		logger:      opts.Logger,
 	}
 }
@@ -136,7 +140,10 @@ func (d *Dispatcher) Do(
 
 		// Past the first streamed byte, failover is impossible.
 		if outcome != nil && !outcome.Retryable() {
-			d.logger.Warn("backend failed after the response began; cannot fail over",
+			if d.metrics != nil {
+				d.metrics.RetriesTotal.WithLabelValues("not_retryable").Inc()
+			}
+			d.logger.WarnContext(ctx, "backend failed after the response began; cannot fail over",
 				"backend", target.Name, "error", err)
 			return result, err
 		}
@@ -149,12 +156,16 @@ func (d *Dispatcher) Do(
 		// and retries stop, which is the entire point: retrying everything is
 		// how a partial outage becomes a total one.
 		if d.budget != nil && !d.budget.Withdraw() {
-			d.logger.Warn("retry budget exhausted; not retrying",
+			if d.metrics != nil {
+				d.metrics.RetriesTotal.WithLabelValues("budget_exhausted").Inc()
+			}
+			d.logger.WarnContext(ctx, "retry budget exhausted; not retrying",
 				"backend", target.Name, "error", err)
 			break
 		}
 
-		d.logger.Info("retrying on another backend",
+		d.recordRetry(err)
+		d.logger.InfoContext(ctx, "retrying on another backend",
 			"failed_backend", target.Name, "attempt", attempt+1, "error", err)
 
 		if d.backoff != nil && !d.backoff.Wait(ctx, attempt) {
@@ -205,13 +216,51 @@ func (d *Dispatcher) recordOutcome(b *backend.Backend, outcome *Outcome, err err
 		breaker.Record(resilience.OutcomeSuccess)
 	case errors.Is(err, ErrTTFTTimeout), errors.Is(err, context.DeadlineExceeded):
 		breaker.Record(resilience.OutcomeTimeout)
+		d.countUpstreamError(b.Name, "timeout")
 	case errors.Is(err, context.Canceled):
 		// The client hung up. That is not the backend's fault and must not
 		// count against it, or a burst of impatient clients would trip every
 		// breaker in the fleet.
 	default:
 		breaker.Record(resilience.OutcomeFailure)
+		d.countUpstreamError(b.Name, upstreamErrorKind(err))
 	}
+}
+
+// upstreamErrorKind classifies a failure for the metric label, keeping
+// cardinality bounded — raw error strings would create an unbounded label set.
+func upstreamErrorKind(err error) string {
+	switch {
+	case errors.Is(err, ErrUpstreamUnavailable):
+		return "unreachable"
+	case errors.Is(err, ErrUpstreamServerError):
+		return "server_error"
+	default:
+		return "other"
+	}
+}
+
+func (d *Dispatcher) countUpstreamError(backendName, kind string) {
+	if d.metrics != nil {
+		d.metrics.UpstreamErrors.WithLabelValues(backendName, kind).Inc()
+	}
+}
+
+// recordRetry counts a retry by the reason that triggered it.
+func (d *Dispatcher) recordRetry(err error) {
+	if d.metrics == nil {
+		return
+	}
+	reason := "upstream_error"
+	switch {
+	case errors.Is(err, ErrTTFTTimeout):
+		reason = "ttft_timeout"
+	case errors.Is(err, ErrUpstreamUnavailable):
+		reason = "unreachable"
+	case errors.Is(err, ErrUpstreamServerError):
+		reason = "server_error"
+	}
+	d.metrics.RetriesTotal.WithLabelValues(reason).Inc()
 }
 
 // Breakers owns one circuit breaker per backend and wires them into the pool so

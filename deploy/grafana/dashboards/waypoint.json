@@ -1,0 +1,266 @@
+{
+  "uid": "waypoint-overview",
+  "title": "Waypoint — LLM Gateway",
+  "tags": ["waypoint", "llm", "gateway"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Traffic & latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by status",
+      "description": "Throughput split by HTTP status. A rising 503 line means admission shedding; 429 means rate limiting; 502/504 means backend trouble.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "stacking": { "mode": "normal" } } }
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(waypoint_requests_total[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Time to first token (p50 / p95 / p99)",
+      "description": "The latency users perceive. Prefill dominates it, so prefix-cache hit rate moves this far more than decode speed does.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(waypoint_ttft_seconds_bucket[1m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(waypoint_ttft_seconds_bucket[1m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(waypoint_ttft_seconds_bucket[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "End-to-end duration (p50 / p95 / p99)",
+      "description": "Total request time including generation. Long-tail here with flat TTFT means decode slowed, usually from batch pressure.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(waypoint_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(waypoint_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(waypoint_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate",
+      "description": "Share of requests failing. Separating 5xx from 429/503 distinguishes 'broken' from 'deliberately shed'.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+      "targets": [
+        {
+          "expr": "sum(rate(waypoint_requests_total{status=~\"5..\"}[1m])) / clamp_min(sum(rate(waypoint_requests_total[1m])), 0.001)",
+          "legendFormat": "5xx"
+        },
+        {
+          "expr": "sum(rate(waypoint_requests_total{status=\"429\"}[1m])) / clamp_min(sum(rate(waypoint_requests_total[1m])), 0.001)",
+          "legendFormat": "429 rate limited"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Backends & routing",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+    },
+    {
+      "type": "timeseries",
+      "title": "In-flight tokens per backend",
+      "description": "The gateway's load signal. Divergence between backends is routing imbalance; the load-aware policy exists to flatten this.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "expr": "waypoint_backend_inflight_tokens",
+          "legendFormat": "{{backend}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Load imbalance (max / mean)",
+      "description": "1.0 is perfectly balanced. The bounded-load policy caps this near its configured load_factor.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+      "targets": [
+        {
+          "expr": "max(waypoint_backend_inflight_tokens) / clamp_min(avg(waypoint_backend_inflight_tokens), 1)",
+          "legendFormat": "max/mean"
+        }
+      ]
+    },
+    {
+      "type": "state-timeline",
+      "title": "Circuit breaker state",
+      "description": "0 closed, 1 half-open, 2 open. A backend going open should coincide with its traffic dropping to zero.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "closed", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "half-open", "color": "orange" } } },
+            { "type": "value", "options": { "2": { "text": "open", "color": "red" } } }
+          ]
+        }
+      },
+      "targets": [
+        { "expr": "waypoint_breaker_state", "legendFormat": "{{backend}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Backend health",
+      "description": "1 means eligible for routing. Drops here precede traffic redistribution.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "short", "max": 1.2, "min": 0 } },
+      "targets": [
+        { "expr": "waypoint_backend_healthy", "legendFormat": "{{backend}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per backend",
+      "description": "Where traffic actually went. Compare against the routing policy's intent.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 33 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(waypoint_requests_total[1m]))",
+          "legendFormat": "{{backend}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Output throughput (p50 tokens/sec)",
+      "description": "Per-request decode rate. Falls as backend batches fill, which is the cost side of packing load onto fewer servers.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 33 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, backend) (rate(waypoint_tokens_per_second_bucket[1m])))",
+          "legendFormat": "{{backend}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Cache, admission & limits",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 }
+    },
+    {
+      "type": "stat",
+      "title": "Cache hit rate",
+      "description": "Hits over all cache lookups. Worth reading next to the quality measurement for semantic hits.",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 41 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.2 },
+              { "color": "green", "value": 0.4 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(waypoint_cache_hits_total[5m])) / clamp_min(sum(rate(waypoint_cache_hits_total[5m])) + sum(rate(waypoint_cache_misses_total[5m])), 0.001)",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache hits by layer",
+      "description": "Exact hits are free correctness-wise; semantic hits carry quality risk, so the split matters more than the total.",
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 41 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(waypoint_cache_hits_total[1m]))",
+          "legendFormat": "{{type}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Admission queue depth",
+      "description": "Sustained depth above zero means the gateway is the bottleneck, not the backends.",
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 41 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "waypoint_queue_depth", "legendFormat": "queued" },
+        { "expr": "waypoint_admission_active", "legendFormat": "active" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries by reason",
+      "description": "A sustained retry rate is not error recovery — it is steady-state load amplification, and the budget should be capping it.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 47 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(waypoint_retries_total[1m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rate limit rejections",
+      "description": "Which budget bound: requests or tokens. They constrain different resources.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 47 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum by (resource) (rate(waypoint_ratelimit_rejections_total[1m]))",
+          "legendFormat": "{{resource}}"
+        }
+      ]
+    }
+  ]
+}

@@ -5,11 +5,16 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
+
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/aarnavnaga/waypoint/internal/admission"
 	"github.com/aarnavnaga/waypoint/internal/cache"
 	"github.com/aarnavnaga/waypoint/internal/openai"
 	"github.com/aarnavnaga/waypoint/internal/router"
+	"github.com/aarnavnaga/waypoint/internal/telemetry"
 )
 
 // maxRequestBytes bounds a request body. Prompts are large but not unbounded,
@@ -19,31 +24,55 @@ const maxRequestBytes = 8 << 20 // 8 MiB
 // handleChatCompletions is the gateway's main request path:
 // parse → admit → route → reserve → dispatch → release.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	// The root span is started by the tracing middleware so that every layer,
+	// including the access log, runs inside it. Each stage below adds a child,
+	// which is what makes a trace answer "where did the time go?".
 	ctx := r.Context()
+	span := trace.SpanFromContext(ctx)
 
 	req, ok := s.parseChatRequest(w, r)
 	if !ok {
+		s.recordRequest(http.StatusBadRequest, "", cache.SourceDisabled, 0, time.Since(start), 0)
 		return
 	}
+
+	span.SetAttributes(
+		telemetry.AttrModel.String(req.Model),
+		telemetry.AttrStreaming.Bool(req.Stream),
+	)
 
 	// Rate limiting runs first, before admission and routing. A request that is
 	// over quota should cost the gateway as little as possible — admitting it
 	// into the queue would let an over-quota tenant occupy capacity that paying
 	// traffic needs.
 	estTokens := s.router.EstimateTokens(req)
-	if !s.checkRateLimit(w, r, estTokens) {
+	span.SetAttributes(telemetry.AttrEstTokens.Int64(estTokens))
+
+	limitCtx, limitSpan := s.tracer.Start(ctx, telemetry.SpanRateLimit)
+	allowed, limitResource := s.checkRateLimit(w, r.WithContext(limitCtx), estTokens)
+	limitSpan.End()
+	if !allowed {
+		s.recordRateLimitRejection(limitResource)
+		s.recordRequest(http.StatusTooManyRequests, "", cache.SourceDisabled, 0, time.Since(start), 0)
+		span.SetStatus(codes.Error, "rate limited")
 		return
 	}
 
 	// Admission control runs before routing: if the gateway cannot serve the
 	// request at all, there is no point choosing who would have served it.
+	_, admitSpan := s.tracer.Start(ctx, telemetry.SpanAdmission)
 	ticket, err := s.admission.Acquire(ctx, admission.ClassInteractive)
+	admitSpan.End()
 	if err != nil {
 		if errors.Is(err, admission.ErrQueueFull) {
 			w.Header().Set("Retry-After", "1")
 			writeAPIError(w, http.StatusServiceUnavailable,
 				"gateway is at capacity, retry shortly",
 				openai.ErrTypeOverloaded, "queue_full")
+			s.recordRequest(http.StatusServiceUnavailable, "", cache.SourceDisabled, 0, time.Since(start), 0)
+			span.SetStatus(codes.Error, "queue full")
 			return
 		}
 		// Context cancelled while queued: the client is already gone.
@@ -55,21 +84,42 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// overload protection) but before routing (a hit needs no backend).
 	bypass := cache.BypassRequested(r.Header.Get("X-Waypoint-Cache"))
 	if s.cache.Enabled() && !bypass {
-		if entry, err := s.cache.Lookup(ctx, req); err == nil {
+		cacheCtx, cacheSpan := s.tracer.Start(ctx, telemetry.SpanCache)
+		entry, lookupErr := s.cache.Lookup(cacheCtx, req)
+		if lookupErr == nil {
+			cacheSpan.SetAttributes(
+				telemetry.AttrCache.String(entry.Source),
+				telemetry.AttrSimilarity.Float64(entry.Similarity),
+			)
+			cacheSpan.End()
+
 			s.serveFromCache(w, req, entry)
+			s.recordCacheResult(entry.Source, true)
+			s.recordRequest(http.StatusOK, entry.Backend, entry.Source, 0, time.Since(start), entry.CompletionTokens)
+			span.SetAttributes(telemetry.AttrCache.String(entry.Source))
 			return
 		}
+		cacheSpan.SetAttributes(telemetry.AttrCache.String(cache.SourceMiss))
+		cacheSpan.End()
+		s.recordCacheResult(cache.SourceMiss, false)
 	}
+
+	cacheResult := cache.SourceDisabled
 	if bypass {
+		cacheResult = cache.SourceBypass
 		w.Header().Set("X-Waypoint-Cache", cache.SourceBypass)
 	} else if s.cache.Enabled() {
+		cacheResult = cache.SourceMiss
 		w.Header().Set("X-Waypoint-Cache", cache.SourceMiss)
 	}
+	span.SetAttributes(telemetry.AttrCache.String(cacheResult))
 
 	routeReq := s.router.BuildRequest(req)
 
 	if len(s.pool.Available(req.Model)) == 0 {
 		s.writeNoBackendError(w, req.Model)
+		s.recordRequest(http.StatusServiceUnavailable, "", cacheResult, 0, time.Since(start), 0)
+		span.SetStatus(codes.Error, "no backend available")
 		return
 	}
 
@@ -98,7 +148,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writer = capture
 	}
 
-	result, err := s.dispatcher.Do(ctx, writer, req, routeReq, body, passthroughHeaders(r))
+	dispatchCtx, dispatchSpan := s.tracer.Start(ctx, telemetry.SpanDispatch)
+	result, err := s.dispatcher.Do(dispatchCtx, writer, req, routeReq, body, passthroughHeaders(r))
+	if result != nil && result.Outcome != nil && result.Outcome.Backend != nil {
+		dispatchSpan.SetAttributes(
+			telemetry.AttrBackend.String(result.Outcome.Backend.Name),
+			telemetry.AttrPolicy.String(s.router.PolicyName()),
+			telemetry.AttrAttempt.Int(result.Attempts),
+			telemetry.AttrTTFTMillis.Int64(result.Outcome.TTFT.Milliseconds()),
+			telemetry.AttrOutTokens.Int(result.Outcome.CompletionTokens),
+		)
+	}
+	dispatchSpan.End()
+
 	if err != nil {
 		started := result != nil && result.Outcome != nil && result.Outcome.ResponseStarted
 		s.logger.Warn("dispatch failed",
@@ -121,6 +183,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		status, typ := errorStatus(err)
 		writeAPIError(w, status, err.Error(), typ, "")
+
+		backendName := ""
+		if result != nil && result.Outcome != nil && result.Outcome.Backend != nil {
+			backendName = result.Outcome.Backend.Name
+		}
+		s.recordRequest(status, backendName, cacheResult, 0, time.Since(start), 0)
+		span.SetStatus(codes.Error, err.Error())
 		return
 	}
 
@@ -128,7 +197,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.storeInCache(req, capture, result.Outcome)
 	}
 
-	s.logger.Debug("dispatch complete",
+	s.recordRequest(http.StatusOK, result.Outcome.Backend.Name, cacheResult,
+		result.Outcome.TTFT, time.Since(start), result.Outcome.CompletionTokens)
+	span.SetAttributes(telemetry.AttrBackend.String(result.Outcome.Backend.Name))
+
+	s.logger.DebugContext(ctx, "dispatch complete",
 		"backend", result.Outcome.Backend.Name,
 		"model", req.Model,
 		"attempts", result.Attempts,

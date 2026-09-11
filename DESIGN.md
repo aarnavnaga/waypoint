@@ -642,3 +642,75 @@ Capture is skipped entirely when the request is not cacheable, so the common
 | Cached streaming replay | 10 of 10 original chunk boundaries preserved |
 | Backend requests served on a cache hit | **0** |
 | Semantic hit on a reworded question | similarity **0.849** (threshold 0.6) |
+
+---
+
+## 10. M7 decisions — observability
+
+### D38 — The root span is started in middleware, not in the handler
+
+**This was a real bug.** The root span was originally created inside
+`handleChatCompletions`, which sits *inside* the logging middleware. The access log
+therefore ran with the pre-span context, and every access log line was emitted without a
+`trace_id`. Traces were fine and logs were fine; the *link between them* — the single
+most useful thing about having both — was silently missing.
+
+Moving span creation into a `traced` middleware that wraps the logger fixes it: every
+inner layer now runs inside the span. Verified end to end — an access log line carrying
+`trace_id=8c5273ec…` retrieves exactly that trace from Jaeger, showing
+`request 47.5ms → ratelimit 4.4ms, admission 0.0ms, cache_lookup 0.5ms, dispatch 42.1ms`.
+
+The middleware also extracts W3C trace context from inbound headers, so the gateway
+appears as a span inside a caller's trace rather than starting a disconnected one, and
+skips `/healthz`, `/readyz` and `/metrics`, which are scraped constantly and would bury
+real traffic.
+
+### D39 — Custom latency buckets
+
+Prometheus's default histogram buckets top out at 10 seconds. Inference spans roughly
+1ms (cache hit) to 60s+ (long generation), so with the defaults every slow generation
+lands in `+Inf` and p99 becomes a straight line at the top bucket — precisely the metric
+you need during an incident. Buckets here run 1ms → 120s.
+
+### D40 — Metric series are pre-created at startup
+
+Prometheus does not export a metric family that has never been observed. A freshly
+started gateway therefore reports *nothing* for retries, cache misses or per-backend load
+until the first one occurs, so dashboards show "No data" instead of zero and an alert on
+`rate(waypoint_retries_total[5m])` cannot distinguish "no retries" from "metric does not
+exist". `Metrics.InitSeries` pre-creates every series whose labels are known at startup.
+
+### D41 — Gauges are sampled on a ticker, not written per request
+
+Per-backend load, health and breaker state describe *current state*, not events. Writing
+them on every request would add metric updates to the hot path to produce values a scrape
+reads once per interval anyway. A 1-second collector samples them instead. Counters and
+histograms, which describe events, are still written inline.
+
+### D42 — Breaker state is encoded as an ordered scale
+
+Gauges must be numeric but breaker state is categorical. Encoding `closed=0 < half_open=1
+< open=2` rather than arbitrary codes means `max_over_time()` and threshold alerts behave
+sensibly — `waypoint_breaker_state > 0` is "something is wrong" without enumerating
+states.
+
+### D43 — Label cardinality is bounded deliberately
+
+Backend names, routing policy, model IDs and status codes are labels (small, bounded
+sets). API keys, prompt hashes, request IDs and raw error strings are **not** — each
+distinct value is a separate time series, and unbounded labels are the standard way to
+take down a Prometheus. Upstream errors are therefore labeled by a classified `kind`
+(`unreachable` / `server_error` / `timeout` / `other`) rather than by error text. The
+high-cardinality identifiers live in traces and logs, which are sampled and indexed for
+exactly that.
+
+### D44 — Tracing never blocks startup or the request path
+
+Spans are exported by a batching processor, so collector latency never reaches a request.
+If the OTLP endpoint is unset or the exporter cannot be built, the gateway falls back to
+a no-op tracer and logs a warning rather than failing. **This design caught its own bug:**
+an `semconv` version mismatch (v1.26.0 against a `resource.Default()` built with v1.43.0)
+made `resource.Merge` fail with "conflicting Schema URL". Because tracing degrades
+gracefully, the gateway started and served traffic perfectly while exporting nothing —
+which is the right behavior, and also exactly why the mismatch needed an explicit test
+(`TestInitTracingBuildsResource`) rather than being noticed by things breaking.

@@ -11,6 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/aarnavnaga/waypoint/internal/admission"
 	"github.com/aarnavnaga/waypoint/internal/backend"
 	"github.com/aarnavnaga/waypoint/internal/cache"
@@ -19,6 +26,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/ratelimit"
 	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
+	"github.com/aarnavnaga/waypoint/internal/telemetry"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
 )
 
@@ -40,6 +48,8 @@ type Options struct {
 	Admission  *admission.Controller
 	Limiter    ratelimit.Limiter
 	Cache      *cache.Cache
+	Metrics    *telemetry.Metrics
+	Tracer     trace.Tracer
 	Estimator  tokenizer.Estimator
 	Logger     *slog.Logger
 	// Redis is optional; when set, /readyz requires it to be reachable.
@@ -60,6 +70,8 @@ type Server struct {
 	admission  *admission.Controller
 	limiter    ratelimit.Limiter
 	cache      *cache.Cache
+	metrics    *telemetry.Metrics
+	tracer     trace.Tracer
 	estimator  tokenizer.Estimator
 	logger     *slog.Logger
 	redis      Readiness
@@ -95,6 +107,12 @@ func NewServer(opts Options) *Server {
 		})
 	}
 
+	// A no-op tracer keeps call sites free of nil checks when tracing is off.
+	tracer := opts.Tracer
+	if tracer == nil {
+		tracer = noop.NewTracerProvider().Tracer(telemetry.TracerName)
+	}
+
 	// Rate limiting defaults to permissive so a partially configured server
 	// still serves rather than denying everything.
 	limiter := opts.Limiter
@@ -118,6 +136,8 @@ func NewServer(opts Options) *Server {
 		admission:  opts.Admission,
 		limiter:    limiter,
 		cache:      opts.Cache,
+		metrics:    opts.Metrics,
+		tracer:     tracer,
 		estimator:  est,
 		logger:     logger,
 		redis:      opts.Redis,
@@ -133,13 +153,20 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/chat/completions", s.authenticated(http.HandlerFunc(s.handleChatCompletions)))
 	mux.Handle("GET /v1/models", s.authenticated(http.HandlerFunc(s.handleModels)))
 
+	if s.metrics != nil {
+		mux.Handle("GET /metrics", s.metrics.Handler())
+	}
+
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /admin/backends", s.handleAdminBackends)
 	mux.HandleFunc("GET /admin/routing", s.handleGetRouting)
 	mux.HandleFunc("POST /admin/routing", s.handleSetRouting)
 
-	return s.recoverPanic(s.logRequests(mux))
+	// Order matters: tracing is outermost (after panic recovery) so every inner
+	// layer — including request logging — runs inside the span and can attach
+	// the trace ID to its output.
+	return s.recoverPanic(s.traced(s.logRequests(mux)))
 }
 
 // ---------- middleware ----------
@@ -169,6 +196,48 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 	})
 }
 
+// traced starts the root span for a request and puts it in the context.
+//
+// This runs *outside* the request logger on purpose. If the span were started
+// inside the handler, the logging middleware would execute with the original
+// context and every access log line would be missing its trace ID — which
+// defeats the point, since the access log is exactly where you look up the
+// trace for a slow request.
+func (s *Server) traced(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health and metrics endpoints are scraped constantly and would bury
+		// real traffic in the trace backend.
+		switch r.URL.Path {
+		case "/healthz", "/readyz", "/metrics":
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Continue an upstream trace when the caller supplied one, so the
+		// gateway appears as a span inside the client's trace rather than
+		// starting a disconnected one.
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(),
+			propagation.HeaderCarrier(r.Header))
+
+		ctx, span := s.tracer.Start(ctx, telemetry.SpanRequest,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("http.request.method", r.Method),
+				attribute.String("url.path", r.URL.Path),
+			),
+		)
+		defer span.End()
+
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r.WithContext(ctx))
+
+		span.SetAttributes(attribute.Int("http.response.status_code", rec.status))
+		if rec.status >= 500 {
+			span.SetStatus(codes.Error, http.StatusText(rec.status))
+		}
+	})
+}
+
 // logRequests emits one structured line per request.
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +250,9 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			return
 		}
-		s.logger.Info("request",
+		// InfoContext, not Info: the trace ID is pulled from the context by
+		// the logging handler, so a plain Info() would drop it.
+		s.logger.InfoContext(r.Context(), "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,

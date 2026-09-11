@@ -23,6 +23,7 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/redisclient"
 	"github.com/aarnavnaga/waypoint/internal/resilience"
 	"github.com/aarnavnaga/waypoint/internal/router"
+	"github.com/aarnavnaga/waypoint/internal/telemetry"
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
 )
 
@@ -51,8 +52,30 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := newLogger(cfg.Telemetry.LogLevel)
+	logger := telemetry.NewLogger(cfg.Telemetry.LogLevel)
 	slog.SetDefault(logger)
+
+	metrics := telemetry.NewMetrics()
+
+	// Tracing failing to initialize must not stop the gateway: observability
+	// is there to explain outages, not to cause them.
+	tracer, shutdownTracing, err := telemetry.InitTracing(context.Background(), telemetry.TracingOptions{
+		ServiceName: cfg.Telemetry.ServiceName,
+		Version:     version,
+		Endpoint:    cfg.Telemetry.OTLPEndpoint,
+		SampleRatio: cfg.Telemetry.TraceSampling,
+		Logger:      logger,
+	})
+	if err != nil {
+		logger.Warn("tracing unavailable; continuing without it", "error", err)
+		tracer, shutdownTracing, _ = telemetry.InitTracing(context.Background(),
+			telemetry.TracingOptions{ServiceName: cfg.Telemetry.ServiceName, Logger: logger})
+	}
+	defer func() {
+		if shutdownTracing != nil {
+			_ = shutdownTracing(context.Background())
+		}
+	}()
 
 	pool, err := backend.NewPool(cfg.Backends)
 	if err != nil {
@@ -105,6 +128,12 @@ func run() error {
 
 	responseCache := buildCache(ctxBackground(), cfg, rdb, logger)
 
+	backendNames := make([]string, 0, pool.Len())
+	for _, b := range pool.All() {
+		backendNames = append(backendNames, b.Name)
+	}
+	metrics.InitSeries(backendNames)
+
 	breakers := api.NewBreakers(pool, cfg.Resilience.Breaker)
 
 	budget := resilience.NewRetryBudget(resilience.RetryBudgetOptions{
@@ -124,6 +153,7 @@ func run() error {
 			cfg.Resilience.Backoff.Max.Duration,
 		),
 		MaxAttempts: cfg.Resilience.MaxAttempts,
+		Metrics:     metrics,
 		Logger:      logger,
 	})
 
@@ -148,6 +178,8 @@ func run() error {
 		Admission:  admitter,
 		Limiter:    limiter,
 		Cache:      responseCache,
+		Metrics:    metrics,
+		Tracer:     tracer,
 		Estimator:  estimator,
 		Logger:     logger,
 		Redis:      rdb,
@@ -184,6 +216,9 @@ func run() error {
 	// Active probing complements the breakers' passive signal: a breaker cannot
 	// notice recovery on a backend it has stopped sending traffic to.
 	go healthChecker.Run(ctx)
+	// Gauges describe current state, so they are sampled on a ticker rather
+	// than written on the request path.
+	go server.StartGaugeCollector(ctx, time.Second)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -239,22 +274,6 @@ func newUpstreamClient(cfg config.Config) *http.Client {
 	}
 
 	return &http.Client{Transport: transport}
-}
-
-func newLogger(level string) *slog.Logger {
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(level)); err != nil {
-		lvl = slog.LevelInfo
-	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: lvl,
-		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				a.Value = slog.StringValue(time.Now().UTC().Format(time.RFC3339Nano))
-			}
-			return a
-		},
-	}))
 }
 
 // ctxBackground is a tiny helper so buildCache reads clearly at the call site.
