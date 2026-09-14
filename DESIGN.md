@@ -714,3 +714,86 @@ made `resource.Merge` fail with "conflicting Schema URL". Because tracing degrad
 gracefully, the gateway started and served traffic perfectly while exporting nothing —
 which is the right behavior, and also exactly why the mismatch needed an explicit test
 (`TestInitTracingBuildsResource`) rather than being noticed by things breaking.
+
+---
+
+## 11. M8 decisions — benchmarks
+
+### D45 — Open-loop load generation
+
+k6's `constant-arrival-rate` executor starts requests at a fixed rate regardless of how
+long previous ones take.
+
+A closed-loop generator (N virtual users in a loop) throttles *itself* when the system
+slows down, because a slow response delays the next request. That hides exactly the
+behavior a gateway benchmark exists to expose: queue growth, admission shedding, and the
+latency cliff at saturation. With closed-loop load you measure a system that can never
+actually be overloaded, and you get a reassuring graph that says nothing.
+
+The cost is that k6 must have enough VUs preallocated, or it silently degrades into
+closed-loop when it runs out — hence the generous `preAllocatedVUs`.
+
+### D46 — Zipf-distributed prompt popularity
+
+Real LLM traffic is dominated by a few very common system prompts with a long tail.
+Uniform sampling makes prefix caching look worthless (nothing repeats); a single prompt
+makes it look magical (everything repeats). Neither predicts production. The workload
+draws system prompts from a Zipf distribution (s=1.1), where the most popular prompt
+takes roughly a third of traffic.
+
+### D47 — KV cache capacity must be scarce for the routing benchmark to mean anything
+
+**The first routing benchmark showed all four policies within 1ms of each other**, at
+roughly a 0.6 prefix-cache hit rate across the board. The policies were working; the
+*experiment* was wrong.
+
+With the default 2048-block cache, every backend could hold every system prompt in the
+working set. If all backends cache everything, where a request is routed cannot affect
+whether it hits — so routing is unmeasurable by construction.
+
+That is not the production condition. KV cache is GPU memory and is always scarce
+relative to the working set, which is precisely *why* placement matters. The benchmark
+now configures 16 distinct system prompts (~10 blocks each, a ~160-block working set)
+against 24 blocks per backend, so a backend holds roughly two prompts and routing
+determines hit rate.
+
+Generalizable: **a benchmark where the independent variable cannot influence the outcome
+will faithfully report no effect.** Before trusting a null result, check that the
+mechanism under test is even reachable.
+
+### D48 — `prefix_tokens` must stop before the part of the prompt that varies
+
+After fixing capacity, affinity *still* did not win. The cause was `prefix_tokens: 256`
+against ~169-token system prompts: the affinity key extended past the shared system
+prompt into the first user question, so every request produced a different key and
+consistent hashing distributed them at random. The configuration looked entirely
+reasonable and silently disabled the feature.
+
+Lowering it to 128 tokens — safely inside the shared span — made affinity work:
+hit rate 18.5% → 29.2% at 20 RPS.
+
+This is a real operational lesson, not a benchmark artifact: `prefix_tokens` must be
+tuned to the *shared* prefix length of actual traffic. Too long and affinity silently
+degrades to random routing; too short and unrelated conversations collide.
+
+### D49 — Overhead must be measured below saturation
+
+The first gateway-overhead measurement reported the gateway as **faster** than calling a
+backend directly (-697ms at p50). That was not a result, it was a saturated system: at
+20 RPS against one backend both paths were queueing, and the measurement reflected
+queue dynamics rather than the proxy hop.
+
+Re-measured at 4 RPS, well below capacity: the gateway adds **+1.5 ms at p50**, with p95
+and p99 deltas negative but smaller than run-to-run variance — so the honest claim is
+"within noise at the tail", not "makes requests faster".
+
+### D50 — Report missing data as a dash, never as zero
+
+`bench/report.py` renders a missing measurement as `—`. Printing it as `0` would read as
+"we measured zero" rather than "we did not measure this", and the whole point of the
+working rules' no-fabrication clause is that the difference must stay visible.
+
+The report also explicitly labels the saturated 40 RPS rows as overload measurements
+rather than policy comparisons, and documents the observed run-to-run variance in the
+semantic-threshold sweep (52%–84% for the same configuration) rather than presenting a
+single run as a clean curve.

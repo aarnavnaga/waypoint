@@ -1,0 +1,95 @@
+{
+  "experiment": "caching",
+  "generated_at": "2026-10-13T11:40:20.751367+00:00",
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpu": "Apple M3",
+    "cores": 8,
+    "memory_bytes": 17179869184,
+    "go_version": "go version go1.27.2 darwin/arm64",
+    "k6_version": "k6 v2.3.0 (commit/devel, go1.27.1, darwin/arm64)",
+    "git_sha": "abaf918",
+    "git_dirty": true
+  },
+  "workload": {
+    "duration": "30s",
+    "system_prompts": 16,
+    "prefix_capacity_blocks_per_backend": 24,
+    "routing_prefix_tokens": 128,
+    "backends": 3,
+    "note": "KV cache capacity is deliberately scarce relative to the prompt working set; with abundant capacity every backend holds every prefix and routing policy cannot matter."
+  },
+  "runs": [
+    {
+      "config": "off",
+      "threshold": 0.92,
+      "requests": 496,
+      "cache_hits": 0,
+      "cache_misses": 0,
+      "hit_rate": 0,
+      "ttft_p50_ms": 591.1949999999999,
+      "ttft_p95_ms": 639.7745,
+      "e2e_p50_ms": 592,
+      "e2e_p95_ms": 641.25,
+      "e2e_p99_ms": 668.1,
+      "success_rate": 1
+    },
+    {
+      "config": "exact",
+      "threshold": 0.92,
+      "requests": 479,
+      "cache_hits": 250,
+      "cache_misses": 229,
+      "hit_rate": 0.5219206680584552,
+      "ttft_p50_ms": 3.097,
+      "ttft_p95_ms": 606.9186,
+      "e2e_p50_ms": 4,
+      "e2e_p95_ms": 609,
+      "e2e_p99_ms": 642.88,
+      "success_rate": 1
+    },
+    {
+      "config": "semantic_0.80",
+      "threshold": 0.8,
+      "requests": 490,
+      "cache_hits": 412,
+      "cache_misses": 78,
+      "hit_rate": 0.8408163265306122,
+      "ttft_p50_ms": 15.812999999999999,
+      "ttft_p95_ms": 566.1379999999999,
+      "e2e_p50_ms": 16,
+      "e2e_p95_ms": 566.65,
+      "e2e_p99_ms": 583.22,
+      "success_rate": 1
+    },
+    {
+      "config": "semantic_0.90",
+      "threshold": 0.9,
+      "requests": 490,
+      "cache_hits": 409,
+      "cache_misses": 81,
+      "hit_rate": 0.8346938775510204,
+      "ttft_p50_ms": 16.213500000000003,
+      "ttft_p95_ms": 564.2919499999999,
+      "e2e_p50_ms": 17,
+      "e2e_p95_ms": 564.65,
+      "e2e_p99_ms": 581,
+      "success_rate": 1
+    },
+    {
+      "config": "semantic_0.95",
+      "threshold": 0.95,
+      "requests": 495,
+      "cache_hits": 408,
+      "cache_misses": 87,
+      "hit_rate": 0.8242424242424242,
+      "ttft_p50_ms": 15.67,
+      "ttft_p95_ms": 564.813,
+      "e2e_p50_ms": 16,
+      "e2e_p95_ms": 565.3,
+      "e2e_p99_ms": 579.06,
+      "success_rate": 1
+    }
+  ]
+}

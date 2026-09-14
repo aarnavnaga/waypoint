@@ -1,0 +1,225 @@
+{
+  "experiment": "resilience",
+  "generated_at": "2026-10-13T11:30:15.535091+00:00",
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpu": "Apple M3",
+    "cores": 8,
+    "memory_bytes": 17179869184,
+    "go_version": "go version go1.27.2 darwin/arm64",
+    "k6_version": "k6 v2.3.0 (commit/devel, go1.27.1, darwin/arm64)",
+    "git_sha": "abaf918",
+    "git_dirty": true
+  },
+  "workload": {
+    "duration": "20s",
+    "system_prompts": 16,
+    "prefix_capacity_blocks_per_backend": 24,
+    "routing_prefix_tokens": 128,
+    "backends": 3,
+    "note": "KV cache capacity is deliberately scarce relative to the prompt working set; with abundant capacity every backend holds every prefix and routing policy cannot matter."
+  },
+  "runs": [
+    {
+      "scenario": "baseline",
+      "requests": 401,
+      "availability": 1,
+      "breaker_tripped": false,
+      "breaker_trip_at_s": null,
+      "breaker_recovered_at_s": null,
+      "breaker_samples": 33,
+      "requests_per_backend": {},
+      "ttft_p50_ms": 49.126,
+      "ttft_p95_ms": 72.313,
+      "ttft_p99_ms": 73.615,
+      "e2e_p99_ms": 676,
+      "upstream_errors": 0,
+      "shed_503": 0,
+      "breakers": {
+        "mock-1": {
+          "state": "closed",
+          "window_total": 57,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-2": {
+          "state": "closed",
+          "window_total": 64,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-3": {
+          "state": "closed",
+          "window_total": 79,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        }
+      },
+      "retry_budget": {
+        "tokens": 10,
+        "granted_total": 0,
+        "denied_total": 0
+      }
+    },
+    {
+      "scenario": "kill",
+      "requests": 401,
+      "availability": 1,
+      "breaker_tripped": false,
+      "breaker_trip_at_s": null,
+      "breaker_recovered_at_s": null,
+      "breaker_samples": 32,
+      "requests_per_backend": {},
+      "ttft_p50_ms": 72.231,
+      "ttft_p95_ms": 417.058,
+      "ttft_p99_ms": 5210.82,
+      "e2e_p99_ms": 5873,
+      "upstream_errors": 0,
+      "shed_503": 0,
+      "breakers": {
+        "mock-1": {
+          "state": "closed",
+          "window_total": 0,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-2": {
+          "state": "closed",
+          "window_total": 93,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-3": {
+          "state": "closed",
+          "window_total": 109,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        }
+      },
+      "retry_budget": {
+        "tokens": 10,
+        "granted_total": 9,
+        "denied_total": 0
+      }
+    },
+    {
+      "scenario": "slow",
+      "requests": 401,
+      "availability": 1,
+      "breaker_tripped": false,
+      "breaker_trip_at_s": null,
+      "breaker_recovered_at_s": null,
+      "breaker_samples": 36,
+      "requests_per_backend": {},
+      "ttft_p50_ms": 55.894,
+      "ttft_p95_ms": 2055.151,
+      "ttft_p99_ms": 2072.026,
+      "e2e_p99_ms": 2590,
+      "upstream_errors": 0,
+      "shed_503": 0,
+      "breakers": {
+        "mock-1": {
+          "state": "closed",
+          "window_total": 25,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-2": {
+          "state": "closed",
+          "window_total": 56,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-3": {
+          "state": "closed",
+          "window_total": 80,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        }
+      },
+      "retry_budget": {
+        "tokens": 10,
+        "granted_total": 9,
+        "denied_total": 0
+      }
+    },
+    {
+      "scenario": "errors",
+      "requests": 401,
+      "availability": 0.9451371571072319,
+      "breaker_tripped": false,
+      "breaker_trip_at_s": null,
+      "breaker_recovered_at_s": null,
+      "breaker_samples": 33,
+      "requests_per_backend": {},
+      "ttft_p50_ms": 53.344,
+      "ttft_p95_ms": 72.6894,
+      "ttft_p99_ms": 78.77216,
+      "e2e_p99_ms": 684.4399999999999,
+      "upstream_errors": 22,
+      "shed_503": 0,
+      "breakers": {
+        "mock-1": {
+          "state": "closed",
+          "window_total": 72,
+          "window_failures": 21,
+          "window_timeouts": 0,
+          "error_rate": 0.2916666666666667,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-2": {
+          "state": "closed",
+          "window_total": 54,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        },
+        "mock-3": {
+          "state": "closed",
+          "window_total": 72,
+          "window_failures": 0,
+          "window_timeouts": 0,
+          "error_rate": 0,
+          "timeout_rate": 0,
+          "transitions": 0
+        }
+      },
+      "retry_budget": {
+        "tokens": 1.4439634169999978,
+        "granted_total": 34,
+        "denied_total": 22
+      }
+    }
+  ]
+}

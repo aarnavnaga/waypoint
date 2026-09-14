@@ -1,0 +1,71 @@
+{
+  "experiment": "scaling",
+  "generated_at": "2026-10-13T11:48:09.701714+00:00",
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpu": "Apple M3",
+    "cores": 8,
+    "memory_bytes": 17179869184,
+    "go_version": "go version go1.27.2 darwin/arm64",
+    "k6_version": "k6 v2.3.0 (commit/devel, go1.27.1, darwin/arm64)",
+    "git_sha": "abaf918",
+    "git_dirty": true
+  },
+  "workload": {
+    "duration": "25s",
+    "system_prompts": 16,
+    "prefix_capacity_blocks_per_backend": 24,
+    "routing_prefix_tokens": 128,
+    "backends": 3,
+    "note": "KV cache capacity is deliberately scarce relative to the prompt working set; with abundant capacity every backend holds every prefix and routing policy cannot matter."
+  },
+  "runs": [
+    {
+      "measurement": "gateway_overhead",
+      "direct_p50_ms": 386,
+      "direct_p95_ms": 405,
+      "direct_p99_ms": 413,
+      "gateway_p50_ms": 387.5,
+      "gateway_p95_ms": 404,
+      "gateway_p99_ms": 407.01,
+      "added_p50_ms": 1.5,
+      "added_p95_ms": -1,
+      "added_p99_ms": -5.99,
+      "note": "Same workload, single backend, gateway features disabled, measured unsaturated so the delta reflects the proxy hop rather than queueing."
+    },
+    {
+      "measurement": "shared_rate_limit",
+      "replicas": 1,
+      "configured_rpm": 300,
+      "requests_sent": 1000,
+      "allowed": 424,
+      "rate_limited": 576,
+      "throughput_rps": 39.71899289157128,
+      "ttft_p50_ms": 448.1065,
+      "ttft_p99_ms": 519.21204
+    },
+    {
+      "measurement": "shared_rate_limit",
+      "replicas": 2,
+      "configured_rpm": 300,
+      "requests_sent": 1000,
+      "allowed": 424,
+      "rate_limited": 576,
+      "throughput_rps": 39.6912166235071,
+      "ttft_p50_ms": 447.8825,
+      "ttft_p99_ms": 515.79693
+    },
+    {
+      "measurement": "shared_rate_limit",
+      "replicas": 4,
+      "configured_rpm": 300,
+      "requests_sent": 1001,
+      "allowed": 424,
+      "rate_limited": 577,
+      "throughput_rps": 39.79584611673843,
+      "ttft_p50_ms": 452.2315,
+      "ttft_p99_ms": 566.32317
+    }
+  ]
+}

@@ -1,0 +1,265 @@
+{
+  "experiment": "routing",
+  "generated_at": "2026-10-13T11:18:34.537410+00:00",
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpu": "Apple M3",
+    "cores": 8,
+    "memory_bytes": 17179869184,
+    "go_version": "go version go1.27.2 darwin/arm64",
+    "k6_version": "k6 v2.3.0 (commit/devel, go1.27.1, darwin/arm64)",
+    "git_sha": "abaf918",
+    "git_dirty": true
+  },
+  "workload": {
+    "duration": "30s",
+    "system_prompts": 16,
+    "prefix_capacity_blocks_per_backend": 24,
+    "routing_prefix_tokens": 128,
+    "backends": 3,
+    "note": "KV cache capacity is deliberately scarce relative to the prompt working set; with abundant capacity every backend holds every prefix and routing policy cannot matter."
+  },
+  "runs": [
+    {
+      "policy": "round_robin",
+      "rps": 10,
+      "requests": 301,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.753,
+      "ttft_p95_ms": 73.323,
+      "ttft_p99_ms": 74.346,
+      "e2e_p50_ms": 742,
+      "e2e_p95_ms": 774,
+      "e2e_p99_ms": 794,
+      "throughput_rps": 9.798614065796555,
+      "prefix_cache_hit_rate": 0.14827405857740586,
+      "requests_per_backend": {
+        "mock-1": 101,
+        "mock-2": 100,
+        "mock-3": 100
+      },
+      "load_imbalance_max_over_mean": 1.0066445182724253
+    },
+    {
+      "policy": "round_robin",
+      "rps": 20,
+      "requests": 601,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.432,
+      "ttft_p95_ms": 73.459,
+      "ttft_p99_ms": 74.762,
+      "e2e_p50_ms": 871,
+      "e2e_p95_ms": 914,
+      "e2e_p99_ms": 933,
+      "throughput_rps": 19.52991970700831,
+      "prefix_cache_hit_rate": 0.18541913409659166,
+      "requests_per_backend": {
+        "mock-1": 201,
+        "mock-2": 200,
+        "mock-3": 200
+      },
+      "load_imbalance_max_over_mean": 1.0033277870216306
+    },
+    {
+      "policy": "round_robin",
+      "rps": 40,
+      "requests": 1132,
+      "success_rate": 1,
+      "ttft_p50_ms": 7922.146000000001,
+      "ttft_p95_ms": 14061.5029,
+      "ttft_p99_ms": 14511.83081,
+      "e2e_p50_ms": 8828.5,
+      "e2e_p95_ms": 14973.45,
+      "e2e_p99_ms": 15380.38,
+      "throughput_rps": 24.985667453038314,
+      "prefix_cache_hit_rate": 0.20331399007201287,
+      "requests_per_backend": {
+        "mock-1": 378,
+        "mock-2": 377,
+        "mock-3": 377
+      },
+      "load_imbalance_max_over_mean": 1.0017667844522968
+    },
+    {
+      "policy": "least_loaded",
+      "rps": 10,
+      "requests": 301,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.435,
+      "ttft_p95_ms": 72.982,
+      "ttft_p99_ms": 74.169,
+      "e2e_p50_ms": 742,
+      "e2e_p95_ms": 767,
+      "e2e_p99_ms": 774,
+      "throughput_rps": 9.801004762539401,
+      "prefix_cache_hit_rate": 0.19270149645576268,
+      "requests_per_backend": {
+        "mock-1": 102,
+        "mock-2": 99,
+        "mock-3": 100
+      },
+      "load_imbalance_max_over_mean": 1.0166112956810631
+    },
+    {
+      "policy": "least_loaded",
+      "rps": 20,
+      "requests": 601,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.469,
+      "ttft_p95_ms": 73.35,
+      "ttft_p99_ms": 74.727,
+      "e2e_p50_ms": 870,
+      "e2e_p95_ms": 898,
+      "e2e_p99_ms": 907,
+      "throughput_rps": 19.510450654401943,
+      "prefix_cache_hit_rate": 0.20806766428106702,
+      "requests_per_backend": {
+        "mock-1": 200,
+        "mock-2": 200,
+        "mock-3": 201
+      },
+      "load_imbalance_max_over_mean": 1.0033277870216306
+    },
+    {
+      "policy": "least_loaded",
+      "rps": 40,
+      "requests": 1129,
+      "success_rate": 1,
+      "ttft_p50_ms": 8109.85,
+      "ttft_p95_ms": 14175.2308,
+      "ttft_p99_ms": 14666.92048,
+      "e2e_p50_ms": 9015,
+      "e2e_p95_ms": 15079,
+      "e2e_p99_ms": 15583.76,
+      "throughput_rps": 24.752053050161077,
+      "prefix_cache_hit_rate": 0.1684136967155835,
+      "requests_per_backend": {
+        "mock-1": 376,
+        "mock-2": 377,
+        "mock-3": 376
+      },
+      "load_imbalance_max_over_mean": 1.0017714791851196
+    },
+    {
+      "policy": "prefix_affinity",
+      "rps": 10,
+      "requests": 300,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.0075,
+      "ttft_p95_ms": 72.85895,
+      "ttft_p99_ms": 73.91967,
+      "e2e_p50_ms": 749.5,
+      "e2e_p95_ms": 801,
+      "e2e_p99_ms": 811.01,
+      "throughput_rps": 9.787003166454381,
+      "prefix_cache_hit_rate": 0.255440414507772,
+      "requests_per_backend": {
+        "mock-1": 79,
+        "mock-2": 85,
+        "mock-3": 136
+      },
+      "load_imbalance_max_over_mean": 1.36
+    },
+    {
+      "policy": "prefix_affinity",
+      "rps": 20,
+      "requests": 600,
+      "success_rate": 1,
+      "ttft_p50_ms": 49.066,
+      "ttft_p95_ms": 82.94639999999998,
+      "ttft_p99_ms": 152.39203999999998,
+      "e2e_p50_ms": 886,
+      "e2e_p95_ms": 980.05,
+      "e2e_p99_ms": 1063.02,
+      "throughput_rps": 19.52087445188638,
+      "prefix_cache_hit_rate": 0.2919920582395764,
+      "requests_per_backend": {
+        "mock-1": 187,
+        "mock-2": 168,
+        "mock-3": 245
+      },
+      "load_imbalance_max_over_mean": 1.225
+    },
+    {
+      "policy": "prefix_affinity",
+      "rps": 40,
+      "requests": 1131,
+      "success_rate": 0.9885057471264368,
+      "ttft_p50_ms": 7811.803,
+      "ttft_p95_ms": 14308.910199999998,
+      "ttft_p99_ms": 19125.95481,
+      "e2e_p50_ms": 8724,
+      "e2e_p95_ms": 15205.55,
+      "e2e_p99_ms": 20039.96,
+      "throughput_rps": 24.596679161243237,
+      "prefix_cache_hit_rate": 0.30026074747609816,
+      "requests_per_backend": {
+        "mock-1": 376,
+        "mock-2": 358,
+        "mock-3": 423
+      },
+      "load_imbalance_max_over_mean": 1.096802074330164
+    },
+    {
+      "policy": "prefix_affinity_load_aware",
+      "rps": 10,
+      "requests": 300,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.522999999999996,
+      "ttft_p95_ms": 73.16235,
+      "ttft_p99_ms": 73.97589,
+      "e2e_p50_ms": 744,
+      "e2e_p95_ms": 784,
+      "e2e_p99_ms": 796.01,
+      "throughput_rps": 9.802961775376502,
+      "prefix_cache_hit_rate": 0.22854893728680137,
+      "requests_per_backend": {
+        "mock-1": 89,
+        "mock-2": 91,
+        "mock-3": 120
+      },
+      "load_imbalance_max_over_mean": 1.2
+    },
+    {
+      "policy": "prefix_affinity_load_aware",
+      "rps": 20,
+      "requests": 601,
+      "success_rate": 1,
+      "ttft_p50_ms": 55.244,
+      "ttft_p95_ms": 73.114,
+      "ttft_p99_ms": 74.794,
+      "e2e_p50_ms": 874,
+      "e2e_p95_ms": 946,
+      "e2e_p99_ms": 967,
+      "throughput_rps": 19.54205391473838,
+      "prefix_cache_hit_rate": 0.21381665353296558,
+      "requests_per_backend": {
+        "mock-1": 182,
+        "mock-2": 184,
+        "mock-3": 235
+      },
+      "load_imbalance_max_over_mean": 1.1730449251247919
+    },
+    {
+      "policy": "prefix_affinity_load_aware",
+      "rps": 40,
+      "requests": 1133,
+      "success_rate": 0.9867608120035305,
+      "ttft_p50_ms": 7691.5064999999995,
+      "ttft_p95_ms": 13973.757249999997,
+      "ttft_p99_ms": 18807.943689999993,
+      "e2e_p50_ms": 8600.5,
+      "e2e_p95_ms": 14886.649999999998,
+      "e2e_p99_ms": 19718.409999999996,
+      "throughput_rps": 24.744211356011828,
+      "prefix_cache_hit_rate": 0.24212531464725492,
+      "requests_per_backend": {
+        "mock-1": 366,
+        "mock-2": 368,
+        "mock-3": 424
+      },
+      "load_imbalance_max_over_mean": 1.0984455958549222
+    }
+  ]
+}
