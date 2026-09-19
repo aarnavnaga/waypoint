@@ -37,6 +37,19 @@ type Metrics struct {
 	RateLimitRejections *prometheus.CounterVec
 }
 
+// Metric label names, declared once so a typo in one call site cannot create a
+// second, near-identical time series.
+const (
+	labelBackend  = "backend"
+	labelPolicy   = "policy"
+	labelStatus   = "status"
+	labelCache    = "cache"
+	labelType     = "type"
+	labelReason   = "reason"
+	labelKind     = "kind"
+	labelResource = "resource"
+)
+
 // latencyBuckets span the range that matters for inference: a cache hit lands
 // near 1ms, a cold prefill in the hundreds of milliseconds, and a long
 // generation in tens of seconds. Prometheus's default buckets top out at 10s,
@@ -59,25 +72,25 @@ func NewMetrics() *Metrics {
 		RequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waypoint_requests_total",
 			Help: "Chat completion requests by outcome, serving backend, routing policy and cache result.",
-		}, []string{"status", "backend", "policy", "cache"}),
+		}, []string{labelStatus, labelBackend, labelPolicy, labelCache}),
 
 		TTFTSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "waypoint_ttft_seconds",
 			Help:    "Time to first content token, the latency users actually perceive.",
 			Buckets: latencyBuckets,
-		}, []string{"backend", "policy", "cache"}),
+		}, []string{labelBackend, labelPolicy, labelCache}),
 
 		DurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "waypoint_request_duration_seconds",
 			Help:    "End-to-end request duration including generation.",
 			Buckets: latencyBuckets,
-		}, []string{"status", "backend", "policy"}),
+		}, []string{labelStatus, labelBackend, labelPolicy}),
 
 		TokensPerSecond: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "waypoint_tokens_per_second",
 			Help:    "Output throughput per request, which degrades as backend batches fill.",
 			Buckets: throughputBuckets,
-		}, []string{"backend"}),
+		}, []string{labelBackend}),
 
 		QueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "waypoint_queue_depth",
@@ -92,42 +105,42 @@ func NewMetrics() *Metrics {
 		BackendInflightToken: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "waypoint_backend_inflight_tokens",
 			Help: "Estimated tokens in flight per backend, the gateway's load signal.",
-		}, []string{"backend"}),
+		}, []string{labelBackend}),
 
 		BackendHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "waypoint_backend_healthy",
 			Help: "1 when a backend is eligible for routing, 0 otherwise.",
-		}, []string{"backend"}),
+		}, []string{labelBackend}),
 
 		CacheHitsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waypoint_cache_hits_total",
 			Help: "Cache hits by layer.",
-		}, []string{"type"}),
+		}, []string{labelType}),
 
 		CacheMissesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waypoint_cache_misses_total",
 			Help: "Cache misses by layer.",
-		}, []string{"type"}),
+		}, []string{labelType}),
 
 		BreakerState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "waypoint_breaker_state",
 			Help: "Circuit breaker state per backend (0=closed, 1=half_open, 2=open).",
-		}, []string{"backend"}),
+		}, []string{labelBackend}),
 
 		RetriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waypoint_retries_total",
 			Help: "Retry attempts by reason.",
-		}, []string{"reason"}),
+		}, []string{labelReason}),
 
 		UpstreamErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waypoint_upstream_errors_total",
 			Help: "Backend failures by backend and kind.",
-		}, []string{"backend", "kind"}),
+		}, []string{labelBackend, labelKind}),
 
 		RateLimitRejections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waypoint_ratelimit_rejections_total",
 			Help: "Requests rejected by rate limiting, by the resource that bound.",
-		}, []string{"resource"}),
+		}, []string{labelResource}),
 	}
 
 	reg.MustRegister(

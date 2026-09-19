@@ -123,7 +123,7 @@ func TestCancelledWaiterDoesNotLeakSlot(t *testing.T) {
 	waiterDone := make(chan struct{})
 	go func() {
 		defer close(waiterDone)
-		if ticket, err := c.Acquire(ctx, ClassInteractive); err == nil {
+		if ticket, acquireErr := c.Acquire(ctx, ClassInteractive); acquireErr == nil {
 			ticket.Release()
 		}
 	}()

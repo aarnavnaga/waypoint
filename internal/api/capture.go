@@ -162,6 +162,9 @@ func (s *Server) storeInCache(req *openai.ChatRequest, capture *captureWriter, o
 		return
 	}
 
+	//nolint:contextcheck // detaching from the request context is the point: it
+	// is cancelled the instant the handler returns, which would abort every
+	// cache write.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

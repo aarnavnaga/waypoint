@@ -124,6 +124,14 @@ func (r *ChatRequest) TemperatureOrDefault() float64 {
 	return *r.Temperature
 }
 
+// Object type values used in responses.
+const (
+	ObjectChatCompletion = "chat.completion"
+	ObjectChatChunk      = "chat.completion.chunk"
+	ObjectList           = "list"
+	ObjectModel          = "model"
+)
+
 // Usage reports token accounting for a completion.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`

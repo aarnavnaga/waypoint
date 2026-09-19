@@ -126,7 +126,7 @@ func (d *Dispatcher) Do(
 		release()
 
 		result.Outcome = outcome
-		d.recordOutcome(target, outcome, err)
+		d.recordOutcome(target, err)
 
 		if err == nil {
 			return result, nil
@@ -202,7 +202,7 @@ func (d *Dispatcher) selectBackend(
 // This is the passive half of health detection: it observes real traffic, so it
 // notices failures that only appear under load, which an active probe of
 // /healthz would never see.
-func (d *Dispatcher) recordOutcome(b *backend.Backend, outcome *Outcome, err error) {
+func (d *Dispatcher) recordOutcome(b *backend.Backend, err error) {
 	if d.breakers == nil {
 		return
 	}

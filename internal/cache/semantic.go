@@ -293,14 +293,18 @@ func buildEntry(payload, scoreStr string) (*Entry, float64, error) {
 		return nil, 0, nil
 	}
 
+	// A corrupt or unparseable stored entry is deliberately reported as a miss
+	// rather than an error: the request can still be served live, and failing
+	// it because the *cache* is damaged would make an optimization into a
+	// liability.
 	entry, err := DecodeEntry([]byte(payload))
 	if err != nil {
-		return nil, 0, nil // treat corruption as a miss
+		return nil, 0, nil //nolint:nilerr // corruption degrades to a miss by design
 	}
 
 	distance, err := strconv.ParseFloat(scoreStr, 64)
 	if err != nil {
-		return nil, 0, nil
+		return nil, 0, nil //nolint:nilerr // unparseable score degrades to a miss
 	}
 	return entry, 1 - distance, nil
 }

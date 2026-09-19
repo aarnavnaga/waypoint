@@ -97,7 +97,7 @@ func (d *Discoverer) Refresh(ctx context.Context, b *Backend) error {
 	defer cancel()
 
 	target := b.URL.JoinPath("/v1/models")
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.String(), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.String(), http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}

@@ -122,7 +122,7 @@ func (e *HTTPEmbedder) Ready(ctx context.Context) error {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, e.baseURL+"/healthz", nil)
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, e.baseURL+"/healthz", http.NoBody)
 	if err != nil {
 		return err
 	}

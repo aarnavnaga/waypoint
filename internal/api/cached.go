@@ -30,7 +30,7 @@ func (s *Server) serveFromCache(w http.ResponseWriter, req *openai.ChatRequest, 
 	if !req.Stream {
 		writeJSON(w, http.StatusOK, openai.ChatResponse{
 			ID:                "chatcmpl-cached",
-			Object:            "chat.completion",
+			Object:            openai.ObjectChatCompletion,
 			Created:           time.Now().Unix(),
 			Model:             req.Model,
 			SystemFingerprint: entry.Backend,
@@ -59,7 +59,7 @@ func (s *Server) serveFromCache(w http.ResponseWriter, req *openai.ChatRequest, 
 	created := time.Now().Unix()
 
 	roleChunk := openai.ChatChunk{
-		ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+		ID: id, Object: openai.ObjectChatChunk, Created: created, Model: req.Model,
 		SystemFingerprint: entry.Backend,
 		Choices: []openai.ChunkChoice{{
 			Index: 0, Delta: openai.Delta{Role: openai.RoleAssistant},
@@ -78,7 +78,7 @@ func (s *Server) serveFromCache(w http.ResponseWriter, req *openai.ChatRequest, 
 
 	for _, fragment := range chunks {
 		chunk := openai.ChatChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			ID: id, Object: openai.ObjectChatChunk, Created: created, Model: req.Model,
 			SystemFingerprint: entry.Backend,
 			Choices: []openai.ChunkChoice{{
 				Index: 0, Delta: openai.Delta{Content: fragment},
@@ -92,7 +92,7 @@ func (s *Server) serveFromCache(w http.ResponseWriter, req *openai.ChatRequest, 
 	stop := "stop"
 	usage := entry.Usage()
 	finalChunk := openai.ChatChunk{
-		ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+		ID: id, Object: openai.ObjectChatChunk, Created: created, Model: req.Model,
 		SystemFingerprint: entry.Backend,
 		Choices: []openai.ChunkChoice{{
 			Index: 0, Delta: openai.Delta{}, FinishReason: &stop,

@@ -1,15 +1,8 @@
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
   enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - gosimple
     - bodyclose
     - contextcheck
     - errorlint
@@ -23,32 +16,54 @@ linters:
     - unconvert
     - unparam
     - whitespace
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-  govet:
-    enable:
-      - shadow
-  revive:
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    govet:
+      enable:
+        - shadow
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: exported
-        disabled: false
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - hugeParam
-      - rangeValCopy
-
+      # Test files use httptest helpers and short-lived clients where the
+      # context and body-close linters are noise rather than signal: the server
+      # is torn down by t.Cleanup and the request lifetime is the test's.
+      - linters:
+          - goconst
+          - gocritic
+          - unparam
+          - noctx
+          - bodyclose
+          - contextcheck
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - goconst
-        - unparam
-        - gocritic
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

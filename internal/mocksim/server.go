@@ -183,7 +183,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, req *o
 	// The first chunk carries the assistant role and no content, matching the
 	// OpenAI wire format clients expect.
 	roleChunk := openai.ChatChunk{
-		ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+		ID: id, Object: openai.ObjectChatChunk, Created: created, Model: req.Model,
 		SystemFingerprint: backend,
 		Choices: []openai.ChunkChoice{{
 			Index: 0,
@@ -197,7 +197,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, req *o
 
 	emit := func(_ int, fragment string) error {
 		chunk := openai.ChatChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			ID: id, Object: openai.ObjectChatChunk, Created: created, Model: req.Model,
 			SystemFingerprint: backend,
 			Choices: []openai.ChunkChoice{{
 				Index: 0,
@@ -220,7 +220,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, req *o
 
 	stop := "stop"
 	finalChunk := openai.ChatChunk{
-		ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+		ID: id, Object: openai.ObjectChatChunk, Created: created, Model: req.Model,
 		SystemFingerprint: backend,
 		Choices: []openai.ChunkChoice{{
 			Index: 0, Delta: openai.Delta{}, FinishReason: &stop,
@@ -260,7 +260,7 @@ func (s *Server) bufferedCompletion(w http.ResponseWriter, r *http.Request, req 
 	w.Header().Set("X-Waypoint-Backend", backend)
 	writeJSON(w, http.StatusOK, openai.ChatResponse{
 		ID:                completionID(plan),
-		Object:            "chat.completion",
+		Object:            openai.ObjectChatCompletion,
 		Created:           s.now().Unix(),
 		Model:             req.Model,
 		SystemFingerprint: backend,

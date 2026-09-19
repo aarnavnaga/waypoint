@@ -194,7 +194,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if capture != nil && result.Outcome != nil {
-		s.storeInCache(req, capture, result.Outcome)
+		// storeInCache deliberately detaches from the request context; see the
+		// comment on its goroutine.
+		s.storeInCache(req, capture, result.Outcome) //nolint:contextcheck // intentional detachment
 	}
 
 	s.recordRequest(http.StatusOK, result.Outcome.Backend.Name, cacheResult,

@@ -140,7 +140,7 @@ func (h *HealthChecker) probe(ctx context.Context, b *backend.Backend) bool {
 	defer cancel()
 
 	target := b.URL.JoinPath(h.opts.Path)
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target.String(), nil)
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target.String(), http.NoBody)
 	if err != nil {
 		return false
 	}

@@ -47,8 +47,17 @@ cover: ## Produce coverage report for internal/
 	$(GO) tool cover -html=coverage.out -o coverage.html
 
 .PHONY: integration
-integration: ## Run Compose-backed integration tests
+integration: ## Run integration tests (needs Redis; Toxiproxy tests skip without it)
 	$(GO) test -race -count=1 -tags=integration ./test/integration/...
+
+.PHONY: deps-up
+deps-up: ## Start just the dependencies integration tests and benchmarks need
+	docker run -d --name waypoint-redis -p 6379:6379 redis/redis-stack-server:7.4.0-v1 || true
+	docker run -d --name waypoint-toxiproxy -p 8474:8474 -p 19100-19110:19100-19110 ghcr.io/shopify/toxiproxy:2.9.0 || true
+
+.PHONY: deps-down
+deps-down: ## Stop the standalone dependencies
+	docker rm -f waypoint-redis waypoint-toxiproxy 2>/dev/null || true
 
 .PHONY: fuzz
 fuzz: ## Run fuzz targets briefly
@@ -58,8 +67,8 @@ fuzz: ## Run fuzz targets briefly
 .PHONY: lint
 lint: ## Run golangci-lint (installs it if absent)
 	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "installing golangci-lint..."; \
-		$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0; \
+		echo "golangci-lint not found; install it with: brew install golangci-lint"; \
+		exit 1; \
 	}
 	golangci-lint run --timeout 5m
 
@@ -119,7 +128,11 @@ bench-scaling: ## Horizontal scaling of gateway replicas (M8)
 
 .PHONY: bench-report
 bench-report: ## Turn bench/results/*.json into tables and charts
-	python3 bench/report.py
+	@test -x bench/.venv/bin/python || { \
+		echo "creating bench venv..."; \
+		python3 -m venv bench/.venv && bench/.venv/bin/pip install --quiet matplotlib; \
+	}
+	bench/.venv/bin/python bench/report.py
 
 .PHONY: clean
 clean: ## Remove build artifacts

@@ -30,6 +30,9 @@ import (
 	"github.com/aarnavnaga/waypoint/internal/tokenizer"
 )
 
+// keyPolicy is the JSON field name used by the admin endpoints.
+const keyPolicy = "policy"
+
 // Readiness reports whether dependencies the gateway needs are usable.
 // Implemented by the Redis client in M5/M6; nil means "no dependency".
 type Readiness interface {
@@ -350,7 +353,7 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	body := map[string]any{
-		"policy":    s.router.PolicyName(),
+		keyPolicy:   s.router.PolicyName(),
 		"backends":  stats,
 		"admission": s.admission.Stats(),
 	}
@@ -368,7 +371,7 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"policy":             s.router.PolicyName(),
+		keyPolicy:            s.router.PolicyName(),
 		"available_policies": config.ValidPolicies,
 	})
 }
@@ -393,7 +396,7 @@ func (s *Server) handleSetRouting(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("routing policy changed", "policy", body.Policy)
-	writeJSON(w, http.StatusOK, map[string]string{"policy": s.router.PolicyName()})
+	writeJSON(w, http.StatusOK, map[string]string{keyPolicy: s.router.PolicyName()})
 }
 
 // ---------- helpers ----------
@@ -420,6 +423,10 @@ func withAPIKey(ctx context.Context, key string) context.Context {
 }
 
 // APIKeyFromContext returns the authenticated key, if any.
+//
+// KeyFromContext would be ambiguous against cache keys and rate-limit keys.
+//
+//nolint:revive // "APIKey" is the domain term used throughout config and docs;
 func APIKeyFromContext(ctx context.Context) string {
 	key, _ := ctx.Value(ctxKeyAPIKey).(string)
 	return key

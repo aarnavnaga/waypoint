@@ -43,7 +43,7 @@ func (h CharHeuristic) Count(text string) int {
 	if ratio <= 0 {
 		ratio = DefaultBytesPerToken
 	}
-	if len(text) == 0 {
+	if text == "" {
 		return 0
 	}
 	n := int(float64(len(text))/ratio + 0.5)
