@@ -190,7 +190,7 @@ rather than as read-modify-write in the application.
 | `internal/sse` | Server-Sent Events codec (fuzzed) |
 | `bench/` | k6 workload, experiment runner, report generator |
 
-Test coverage on `internal/` is ~85%, including fuzz targets for request and SSE parsing,
+Test coverage on `internal/` is 83%, including fuzz targets for request and SSE parsing,
 race-detector runs on every package, and a Toxiproxy-backed integration suite that
 injects transport-level faults.
 
